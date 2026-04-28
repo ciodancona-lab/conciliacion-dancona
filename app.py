@@ -226,6 +226,8 @@ def parse_qr(file):
     qr['FechaQR_dt'] = pd.to_datetime(qr['FechaQR'], format='%d/%m/%Y', errors='coerce')
     qr['CodComercio']= qr['Cód. comercio']
     qr['IdQR']       = qr['Id QR']
+    # Cupón = columna Ticket (número corto de referencia)
+    qr['Cupon']      = qr['Ticket'].fillna('') if 'Ticket' in qr.columns else qr['Id QR']
     return qr
 
 def parse_trx(file):
@@ -546,11 +548,8 @@ def build_excel(flexxus, bank, qr, trx, r):
 
     # ── HOJA 3: FLEXXUS NO BANCO ──
     # Construir lookups para enriquecer entradas sin match
-    qr_by_neto = {}
-    for _, qr_r in qr.iterrows():
-        key = round(qr_r['NetoQR'], 2)
-        if key not in qr_by_neto:
-            qr_by_neto[key] = qr_r
+    # Lookup QR por neto (lista para buscar mejor candidato)
+    qr_list = [(round(r2['NetoQR'], 2), r2) for _, r2 in qr.iterrows()]
 
     trx_by_monto = {}
     for _, tr in trx.iterrows():
@@ -571,15 +570,17 @@ def build_excel(flexxus, bank, qr, trx, r):
         else:
             # Buscar en QR PCT (neto = monto Flexxus con tolerancia 1%)
             key_qr = round(monto, 2)
-            qr_match = qr_by_neto.get(key_qr)
-            # Tolerancia ±1 peso
-            if qr_match is None:
-                for k, v in qr_by_neto.items():
-                    if abs(k - monto) <= 1.0:
-                        qr_match = v; break
+            # Buscar mejor candidato QR (tolerancia 2%)
+            qr_match = None
+            best_diff = float('inf')
+            for k, v in qr_list:
+                diff = abs(k - monto)
+                if diff < best_diff and diff <= monto * 0.02:
+                    best_diff = diff
+                    qr_match = v
             if qr_match is not None:
                 local = LOCAL_MAP.get(str(qr_match['CodComercio']), str(qr_match['CodComercio']))
-                cupon = str(qr_match['IdQR'])
+                cupon = str(qr_match.get('Cupon', qr_match['IdQR'])).strip()
                 monto_comp = round(qr_match['NetoQR'], 2)
                 diferencia = round(monto - monto_comp, 2)
             else:
@@ -590,6 +591,14 @@ def build_excel(flexxus, bank, qr, trx, r):
                     for k, v in trx_by_monto.items():
                         if abs(k - monto) <= 1.0:
                             trx_match = v; break
+                if trx_match is None:
+                    # Buscar mejor candidato TRX (tolerancia 2%)
+                    best_diff2 = float('inf')
+                    for k, v in trx_by_monto.items():
+                        diff = abs(k - monto)
+                        if diff < best_diff2 and diff <= monto * 0.02:
+                            best_diff2 = diff
+                            trx_match = v
                 if trx_match is not None:
                     local = LOCAL_MAP.get(str(trx_match['COMERCIO']), str(trx_match['COMERCIO']))
                     num_liq = str(trx_match['NUMERO LIQUIDACION'])
