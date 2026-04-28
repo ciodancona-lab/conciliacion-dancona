@@ -178,29 +178,52 @@ def classify_bank(concepto):
 def parse_flexxus(file):
     df = pd.read_excel(file, dtype=str)
     rows = []
+    mbext_total = 0.0  # MB-EXT = impuestos/extracciones ya cargados en Flexxus
+    last_saldo_all = 0.0  # saldo del último movimiento de cualquier tipo
+    unknown_types = {}  # tipos desconocidos {tipo: [lista de movimientos]}
     for _, row in df.iterrows():
         fecha = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
         tipo  = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ''
-        if tipo in ('PAV', 'MB-ENT-EX') and '/' in fecha:
-            numero    = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ''
-            movimiento= str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else ''
-            debe_raw  = str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else '0'
-            haber_raw = str(row.iloc[9]).strip() if pd.notna(row.iloc[9]) else '0'
-            saldo_raw = str(row.iloc[10]).strip() if pd.notna(row.iloc[10]) else '0'
-            debe  = parse_ar_num(debe_raw)
-            haber = parse_ar_num(haber_raw)
-            saldo = parse_ar_num(saldo_raw)
+        if '/' not in fecha: continue
+        debe_raw  = str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else '0'
+        haber_raw = str(row.iloc[9]).strip() if pd.notna(row.iloc[9]) else '0'
+        saldo_raw = str(row.iloc[10]).strip() if pd.notna(row.iloc[10]) else '0'
+        debe  = parse_ar_num(debe_raw)
+        haber = parse_ar_num(haber_raw)
+        saldo = parse_ar_num(saldo_raw)
+        if saldo > 0: last_saldo_all = saldo
+        if tipo == 'MB-EXT':
+            mbext_total += haber
+            continue
+        if tipo not in ('PAV', 'MB-ENT-EX'):
+            # Tipo desconocido — guardar para que el usuario decida
+            numero     = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ''
+            movimiento = str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else ''
             monto = debe if debe > 0 else haber
-            rows.append({
-                'FechaFlexxus': fecha, 'Tipo': tipo, 'Numero': numero,
-                'Movimiento': movimiento, 'MontoFlexxus': monto,
-                'SaldoFlexxus': saldo,
-                'EsPedidosYa': 'PEDIDOS YA' in movimiento.upper()
+            unknown_key = tipo
+            if unknown_key not in unknown_types:
+                unknown_types[unknown_key] = []
+            unknown_types[unknown_key].append({
+                'fecha': fecha, 'numero': numero,
+                'movimiento': movimiento, 'monto': monto, 'saldo': saldo
             })
+            continue
+        numero     = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ''
+        movimiento = str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else ''
+        monto = debe if debe > 0 else haber
+        rows.append({
+            'FechaFlexxus': fecha, 'Tipo': tipo, 'Numero': numero,
+            'Movimiento': movimiento, 'MontoFlexxus': monto,
+            'SaldoFlexxus': saldo,
+            'EsPedidosYa': 'PEDIDOS YA' in movimiento.upper()
+        })
     df_out = pd.DataFrame(rows)
     if len(df_out) == 0:
         raise ValueError("No se encontraron filas PAV o MB-ENT-EX en el archivo Flexxus.")
     df_out['FechaFlexxus_dt'] = pd.to_datetime(df_out['FechaFlexxus'], format='%d/%m/%Y')
+    df_out.attrs['mbext_total'] = mbext_total
+    df_out.attrs['last_saldo_all'] = last_saldo_all
+    df_out.attrs['unknown_types'] = unknown_types
     return df_out
 
 def parse_banco(file):
@@ -362,8 +385,13 @@ def compute_results(flexxus, bank):
     b_imp       = ub_egr[ub_egr['Categoria'].isin(IMP_CATS)]
     b_egr_other = ub_egr[~ub_egr['Categoria'].isin(IMP_CATS)]
 
-    # Usar siempre el ultimo saldo del libro Flexxus (no solo PAV matcheados)
-    saldo_f = flexxus['SaldoFlexxus'].dropna().iloc[-1] if flexxus['SaldoFlexxus'].dropna().shape[0] > 0 else 0
+    # Usar el ultimo saldo real de Flexxus (incluyendo MB-EXT de impuestos)
+    # Si hay MB-EXT, el saldo real es el de los PAV/MB-ENT-EX ya que MB-EXT viene después
+    # El saldo_f correcto es el último saldo de los movimientos conciliables (PAV/MB-ENT-EX)
+    saldo_f_pav = flexxus['SaldoFlexxus'].dropna().iloc[-1] if flexxus['SaldoFlexxus'].dropna().shape[0] > 0 else 0
+    mbext_total = flexxus.attrs.get('mbext_total', 0.0)
+    # El saldo real de Flexxus después de los MB-EXT es el saldo PAV menos los MB-EXT
+    saldo_f = saldo_f_pav - mbext_total
 
     saldo_extracto = bank.iloc[0]['SaldoNum']
 
@@ -1105,7 +1133,71 @@ with tab_conc:
                     matched_pav  = res['matched'][res['matched']['Tipo']=='PAV']
                     matched_mbex = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
 
-                    # ── Métricas ──
+                    # ── Tipos desconocidos: preguntar al usuario ──
+                    unknown_types = flexxus_df.attrs.get('unknown_types', {})
+                    tipo_decisions = st.session_state.get('tipo_decisions', {})
+
+                    if unknown_types:
+                        st.markdown("---")
+                        st.markdown("### ⚠️ Tipos de movimiento desconocidos en Flexxus")
+                        st.caption("La app encontró tipos que no reconoce. Definí cómo tratar cada uno para incluirlos en la conciliación.")
+                        decisions_completas = True
+                        for tipo_desc, movs in unknown_types.items():
+                            total_movs = len(movs)
+                            total_monto = sum(m['monto'] for m in movs)
+                            ejemplos = list(set(m['movimiento'] for m in movs[:3]))
+                            st.markdown(f"**`{tipo_desc}`** — {total_movs} movimiento/s · ${total_monto:,.2f}")
+                            st.caption(f"Ejemplos: {', '.join(ejemplos)}")
+                            decision = st.selectbox(
+                                f"¿Cómo tratamos `{tipo_desc}`?",
+                                options=["-- Seleccioná --", "PAV (ingreso a conciliar)", "MB-ENT-EX (egreso a conciliar)", "MB-EXT (extracción/impuesto, descuenta saldo)", "Ignorar (no incluir)"],
+                                key=f"decision_{tipo_desc}"
+                            )
+                            if decision == "-- Seleccioná --":
+                                decisions_completas = False
+                            else:
+                                tipo_decisions[tipo_desc] = decision
+                                st.session_state['tipo_decisions'] = tipo_decisions
+
+                        if not decisions_completas:
+                            st.warning("Definí el tratamiento de todos los tipos desconocidos para continuar.")
+                            st.stop()
+                        else:
+                            extra_rows = []
+                            saldo_extra_mbext = 0.0
+                            for tipo_desc, decision in tipo_decisions.items():
+                                if tipo_desc not in unknown_types: continue
+                                movs = unknown_types[tipo_desc]
+                                if 'PAV' in decision: tipo_flexxus = 'PAV'
+                                elif 'MB-ENT-EX' in decision: tipo_flexxus = 'MB-ENT-EX'
+                                elif 'MB-EXT' in decision:
+                                    for m in movs: saldo_extra_mbext += m['monto']
+                                    continue
+                                else: continue  # Ignorar
+                                for m in movs:
+                                    extra_rows.append({
+                                        'FechaFlexxus': m['fecha'], 'Tipo': tipo_flexxus,
+                                        'Numero': m['numero'], 'Movimiento': m['movimiento'],
+                                        'MontoFlexxus': m['monto'], 'SaldoFlexxus': m['saldo'],
+                                        'EsPedidosYa': False,
+                                        'FechaFlexxus_dt': pd.to_datetime(m['fecha'], format='%d/%m/%Y', errors='coerce')
+                                    })
+                            if extra_rows:
+                                df_extra = pd.DataFrame(extra_rows)
+                                flexxus_df = pd.concat([flexxus_df, df_extra], ignore_index=True)
+                            if saldo_extra_mbext > 0:
+                                flexxus_df.attrs['mbext_total'] = flexxus_df.attrs.get('mbext_total', 0) + saldo_extra_mbext
+                            flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df, qr_df, trx_df)
+                            res = compute_results(flexxus_df, banco_df)
+                            # Guardar mapping en historial
+                            if tipo_decisions:
+                                hist, sha_h = github_get_file(HISTORIAL_FILE)
+                                if hist is not None:
+                                    hist.setdefault('tipo_mappings', {}).update(tipo_decisions)
+                                    github_save_file(HISTORIAL_FILE, hist, sha_h)
+                            st.success(f"✅ {len(extra_rows)} movimientos agregados con el tipo mapeado.")
+
+                # ── Métricas ──
                     st.markdown(f"""
                     <div class="diff-zero">
                         <span style="font-size:1.6rem">✅</span>
@@ -1137,6 +1229,10 @@ with tab_conc:
 
                     # ── Advertencias ──
                     warns = []
+                    # Advertencia MB-EXT
+                    mbext_tot = flexxus_df.attrs.get('mbext_total', 0.0)
+                    if mbext_tot > 0:
+                        warns.append(f"ℹ️ MB-EXT detectados en Flexxus (impuestos/extracciones) por ${mbext_tot:,.2f} — descontados del saldo inicial.")
                     big_unmatch = res['unmatched_f'][(~res['unmatched_f']['EsPedidosYa']) &
                                                       (res['unmatched_f']['MontoFlexxus']>500000) &
                                                       (res['unmatched_f']['FechaFlexxus_dt']<=banco_df['Fecha_dt'].max())]
@@ -1157,6 +1253,34 @@ with tab_conc:
                             st.markdown(f'<div class="warn-box">{w}</div>', unsafe_allow_html=True)
 
                     # ── Descargas ──
+                    # ── Guardar en historial automáticamente al procesar ──
+                    periodo = f"{banco_df['Fecha_dt'].min().strftime('%d/%m/%Y')} al {banco_df['Fecha_dt'].max().strftime('%d/%m/%Y')}"
+                    pav_match = res['matched'][res['matched']['Tipo']=='PAV']
+                    mbex_match = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
+                    unmatched_detalle = [
+                        {"numero": str(r2['Numero']), "tipo": str(r2['Tipo']),
+                         "movimiento": str(r2['Movimiento']), "monto": float(r2['MontoFlexxus']),
+                         "fecha": str(r2['FechaFlexxus'])}
+                        for _, r2 in res['unmatched_f'].iterrows()
+                    ]
+                    try:
+                        semana_id, msg = guardar_conciliacion(
+                            periodo=periodo,
+                            saldo_flexxus=res['saldo_f'],
+                            saldo_banco=res['saldo_extracto'],
+                            matched_count=len(res['matched']),
+                            pav_total=float(pav_match['MontoFlexxus'].sum()),
+                            mbex_total=float(mbex_match['MontoFlexxus'].sum()),
+                            A=res['A'], B=res['B'], C=res['C_total'], D=res['D'],
+                            unmatched_f_detalle=unmatched_detalle
+                        )
+                        if semana_id:
+                            st.success("✅ Conciliación guardada en el historial.")
+                        else:
+                            st.warning(f"⚠️ No se pudo guardar en el historial: {msg}")
+                    except Exception as e_hist:
+                        st.warning(f"⚠️ Error al guardar historial: {str(e_hist)}")
+
                     st.markdown("---")
                     st.markdown("### 📥 Descargar entregables")
 
@@ -1181,36 +1305,7 @@ with tab_conc:
                             use_container_width=True
                         )
 
-                    # ── Guardar en historial automáticamente ──
-                    periodo = f"{banco_df['Fecha_dt'].min().strftime('%d/%m/%Y')} al {banco_df['Fecha_dt'].max().strftime('%d/%m/%Y')}"
-                    pav_match = res['matched'][res['matched']['Tipo']=='PAV']
-                    mbex_match = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
-                    unmatched_detalle = [
-                        {"numero": str(r2['Numero']), "tipo": str(r2['Tipo']),
-                         "movimiento": str(r2['Movimiento']), "monto": float(r2['MontoFlexxus']),
-                         "fecha": str(r2['FechaFlexxus'])}
-                        for _, r2 in res['unmatched_f'].iterrows()
-                    ]
-                    with st.spinner("Guardando en historial..."):
-                        try:
-                            semana_id, msg = guardar_conciliacion(
-                                periodo=periodo,
-                                saldo_flexxus=res['saldo_f'],
-                                saldo_banco=res['saldo_extracto'],
-                                matched_count=len(res['matched']),
-                                pav_total=float(pav_match['MontoFlexxus'].sum()),
-                                mbex_total=float(mbex_match['MontoFlexxus'].sum()),
-                                A=res['A'], B=res['B'], C=res['C_total'], D=res['D'],
-                                unmatched_f_detalle=unmatched_detalle
-                            )
-                            if semana_id:
-                                st.success("✅ Conciliación guardada en el historial.")
-                            else:
-                                st.warning(f"⚠️ No se pudo guardar en el historial: {msg}")
-                        except Exception as e_hist:
-                            st.warning(f"⚠️ Error al guardar historial: {str(e_hist)}")
 
-                    st.caption("⚡ Los archivos se generan en memoria. El historial se guarda en GitHub.")
 
                 except Exception as e:
                     st.error(f"❌ Error al procesar: {str(e)}")
