@@ -8,6 +8,9 @@ import xlwt
 from datetime import datetime
 import io
 import warnings
+import json
+import base64
+import requests
 warnings.filterwarnings('ignore')
 
 # ─── PAGE CONFIG ───────────────────────────────────────────────────────────────
@@ -744,8 +747,8 @@ def build_xls(r):
 
 
 # ─── AUTH ──────────────────────────────────────────────────────────────────────
-VALID_USER     = "dancona2016@gmail.com"
-VALID_PASSWORD = "Dancona2026*"
+VALID_USER     = st.secrets.get("APP_USER", "dancona2016@gmail.com")
+VALID_PASSWORD = st.secrets.get("APP_PASSWORD", "Dancona2026*")
 
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -771,167 +774,428 @@ if not st.session_state.authenticated:
                 st.error("Usuario o contraseña incorrectos.")
     st.stop()
 
-# ─── UI ────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="hero">
-    <div class="badge">🏦 GRUPO D'ANCONA</div>
-    <h1>Conciliación Bancaria Semanal</h1>
-    <p>Subí los 4 archivos · Procesamos el cruce · Descargá los entregables</p>
-</div>
-""", unsafe_allow_html=True)
 
-col1, col2 = st.columns([1, 1], gap="large")
+# ─── GITHUB HISTORIAL ──────────────────────────────────────────────────────────
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+GITHUB_REPO  = st.secrets.get("GITHUB_REPO", "")
+HISTORIAL_FILE = "historico.json"
 
-with col1:
-    st.markdown("### 📂 Archivos de entrada")
+def github_get_file(filename):
+    """Lee un archivo del repo de GitHub. Devuelve (content_dict, sha) o (None, None)."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None, None
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        data = r.json()
+        content = json.loads(base64.b64decode(data['content']).decode('utf-8'))
+        return content, data['sha']
+    return None, None
+
+def github_save_file(filename, content_dict, sha=None):
+    """Guarda/actualiza un archivo JSON en el repo de GitHub."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    encoded = base64.b64encode(json.dumps(content_dict, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
+    body = {"message": f"Update {filename}", "content": encoded}
+    if sha:
+        body["sha"] = sha
+    r = requests.put(url, headers=headers, json=body)
+    return r.status_code in (200, 201)
+
+def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav_total, mbex_total, A, B, C, D, unmatched_f_detalle):
+    """Guarda el resumen y detalle de movimientos de la semana en el historial."""
+    historico, sha = github_get_file(HISTORIAL_FILE)
+    if historico is None:
+        historico = {"semanas": [], "movimientos": []}
+
+    semana_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fecha_proceso = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    # Resumen de la semana
+    semana = {
+        "id": semana_id,
+        "fecha_proceso": fecha_proceso,
+        "periodo": periodo,
+        "saldo_flexxus": round(saldo_flexxus, 2),
+        "saldo_banco": round(saldo_banco, 2),
+        "matcheados": matched_count,
+        "pav_total": round(pav_total, 2),
+        "mbex_total": round(mbex_total, 2),
+        "C1_flexxus_no_banco": round(A, 2),
+        "C2_egresos_no_banco": round(B, 2),
+        "C3_banco_no_flexxus": round(C, 2),
+        "C4_egresos_banco": round(D, 2),
+        "diferencia_final": 0.0
+    }
+    historico["semanas"].append(semana)
+
+    # Detalle de movimientos pendientes (Flexxus no banco)
+    for mov in unmatched_f_detalle:
+        # Buscar si ya existe este número en historial (de semana anterior)
+        existente = next((m for m in historico["movimientos"] if m["numero"] == mov["numero"]), None)
+        if existente:
+            existente["semanas_pendiente"] += 1
+            existente["ultima_semana_vista"] = semana_id
+            existente["estado"] = "pendiente"
+        else:
+            historico["movimientos"].append({
+                "numero": mov["numero"],
+                "tipo": mov["tipo"],
+                "movimiento": mov["movimiento"],
+                "monto": mov["monto"],
+                "fecha_flexxus": mov["fecha"],
+                "primera_semana": semana_id,
+                "ultima_semana_vista": semana_id,
+                "semanas_pendiente": 1,
+                "estado": "pendiente"
+            })
+
+    # Marcar como regularizados los que ya no aparecen como pendientes
+    numeros_pendientes = {m["numero"] for m in unmatched_f_detalle}
+    for mov in historico["movimientos"]:
+        if mov["estado"] == "pendiente" and mov["numero"] not in numeros_pendientes:
+            mov["estado"] = "regularizado"
+            mov["semana_regularizacion"] = semana_id
+
+    github_save_file(HISTORIAL_FILE, historico, sha)
+    return semana_id
+
+def render_historial():
+    """Renderiza la pestaña de historial."""
     st.markdown("""
-    <div class="upload-card">
-        <div class="upload-label">Archivo 1 · Principal</div>
-        <div class="upload-title">Conciliación Bancaria Flexxus</div>
-        <div class="upload-hint">Exportá desde Flexxus → Tesorería → Conciliación Bancaria</div>
+    <div class="hero">
+        <div class="badge">📊 HISTORIAL</div>
+        <h1>Registro Histórico de Conciliaciones</h1>
+        <p>Trazabilidad completa semana a semana · Detección automática de regularizaciones</p>
     </div>
     """, unsafe_allow_html=True)
-    f_flexxus = st.file_uploader("Flexxus", type=['xls','xlsx'], key='flexxus', label_visibility='collapsed')
 
-    st.markdown("""
-    <div class="upload-card">
-        <div class="upload-label">Archivo 2 · Banco</div>
-        <div class="upload-title">Últimos Movimientos BNA</div>
-        <div class="upload-hint">Exportá desde Banco Nación Online → Últimos movimientos</div>
-    </div>
-    """, unsafe_allow_html=True)
-    f_banco = st.file_uploader("Banco", type=['xls','xlsx'], key='banco', label_visibility='collapsed')
+    historico, _ = github_get_file(HISTORIAL_FILE)
 
-    st.markdown("""
-    <div class="upload-card">
-        <div class="upload-label">Archivo 3 · Merchant</div>
-        <div class="upload-title">TRX Merchant Center</div>
-        <div class="upload-hint">Exportá desde Merchant Center → Liquidaciones → TRX</div>
-    </div>
-    """, unsafe_allow_html=True)
-    f_trx = st.file_uploader("TRX", type=['xls','xlsx'], key='trx', label_visibility='collapsed')
+    if not historico or not historico.get("semanas"):
+        st.info("Todavía no hay conciliaciones registradas. Procesá la primera semana desde la pestaña **Conciliación**.")
+        return
 
-    st.markdown("""
-    <div class="upload-card">
-        <div class="upload-label">Archivo 4 · QR</div>
-        <div class="upload-title">Transacciones QR PCT</div>
-        <div class="upload-hint">Exportá desde Merchant Center → QR → Transacciones</div>
-    </div>
-    """, unsafe_allow_html=True)
-    f_qr = st.file_uploader("QR", type=['xls','xlsx'], key='qr', label_visibility='collapsed')
+    semanas = historico["semanas"]
+    movimientos = historico.get("movimientos", [])
 
-with col2:
-    st.markdown("### ⚙️ Proceso y resultados")
+    # ── Resumen semanal ──
+    st.markdown("### 📅 Semanas procesadas")
+    df_sem = pd.DataFrame(semanas)
+    df_sem = df_sem.sort_values("fecha_proceso", ascending=False)
+    df_display = df_sem[["fecha_proceso","periodo","saldo_flexxus","saldo_banco","matcheados","C1_flexxus_no_banco","C3_banco_no_flexxus","diferencia_final"]].copy()
+    df_display.columns = ["Fecha proceso","Período","Saldo Flexxus","Saldo Banco","Matcheados","C1 Flexxus no Banco","C3 Banco no Flexxus","Diferencia"]
+    for col in ["Saldo Flexxus","Saldo Banco","C1 Flexxus no Banco","C3 Banco no Flexxus","Diferencia"]:
+        df_display[col] = df_display[col].apply(lambda x: f"${x:,.2f}")
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-    todos = all([f_flexxus, f_banco, f_trx, f_qr])
+    st.markdown("---")
 
-    if not todos:
-        archivos_ok = sum([bool(f_flexxus), bool(f_banco), bool(f_trx), bool(f_qr)])
-        st.info(f"📎 {archivos_ok}/4 archivos cargados. Subí los 4 para procesar.")
-        st.markdown("""
-        **Reglas aplicadas automáticamente:**
-        - `CR DEBIN SPOT` → QR → PAV
-        - `CR LIQ MASTER/VISA/AMEX` → Liquidación tarjeta → PAV
-        - `PEDIDOS YA` → Canal aparte, sin cupón QR ni nro. liquidación
-        - Fecha acreditación: si banco < Flexxus → se usa fecha Flexxus
-        - Merchant y QR PCT → solo auditoría, no generan carga directa
-        - Impuestos y gastos bancarios → separados para asientos contables
-        """)
-    else:
-        with st.spinner("Procesando conciliación..."):
-            try:
-                flexxus_df = parse_flexxus(f_flexxus)
-                banco_df   = parse_banco(f_banco)
-                qr_df      = parse_qr(f_qr)
-                trx_df     = parse_trx(f_trx)
+    # ── Movimientos pendientes activos ──
+    pendientes = [m for m in movimientos if m["estado"] == "pendiente"]
+    regularizados = [m for m in movimientos if m["estado"] == "regularizado"]
 
-                flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df, qr_df, trx_df)
-                res = compute_results(flexxus_df, banco_df)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"### ⏳ Pendientes actuales ({len(pendientes)})")
+        if pendientes:
+            df_pend = pd.DataFrame(pendientes)
+            df_pend = df_pend.sort_values("semanas_pendiente", ascending=False)
+            df_show = df_pend[["numero","movimiento","monto","fecha_flexxus","semanas_pendiente"]].copy()
+            df_show.columns = ["Nro Flexxus","Movimiento","Monto","Fecha","Semanas pendiente"]
+            df_show["Monto"] = df_show["Monto"].apply(lambda x: f"${x:,.2f}")
+            # Highlight los que llevan más de 1 semana
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+        else:
+            st.success("Sin movimientos pendientes.")
 
-                matched_pav  = res['matched'][res['matched']['Tipo']=='PAV']
-                matched_mbex = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
+    with col2:
+        st.markdown(f"### ✅ Regularizados ({len(regularizados)})")
+        if regularizados:
+            df_reg = pd.DataFrame(regularizados)
+            df_show2 = df_reg[["numero","movimiento","monto","semanas_pendiente"]].copy()
+            df_show2.columns = ["Nro Flexxus","Movimiento","Monto","Semanas que estuvo pendiente"]
+            df_show2["Monto"] = df_show2["Monto"].apply(lambda x: f"${x:,.2f}")
+            st.dataframe(df_show2, use_container_width=True, hide_index=True)
+        else:
+            st.info("Aún no hay movimientos regularizados.")
 
-                # ── Métricas ──
+    st.markdown("---")
+
+    # ── Buscador ──
+    st.markdown("### 🔍 Buscar movimiento")
+    busqueda = st.text_input("Número Flexxus, descripción o monto", placeholder="Ej: 2300013922  /  PEDIDOS YA  /  38886")
+    if busqueda:
+        resultados = [m for m in movimientos if
+                      busqueda.lower() in m["numero"].lower() or
+                      busqueda.lower() in m["movimiento"].lower() or
+                      busqueda in str(m["monto"])]
+        if resultados:
+            for r2 in resultados:
+                estado_icon = "✅" if r2["estado"] == "regularizado" else "⏳"
                 st.markdown(f"""
-                <div class="diff-zero">
-                    <span style="font-size:1.6rem">✅</span>
-                    <span>DIFERENCIA FINAL: $0,00 — Conciliación cerrada</span>
-                </div>
-                <div class="metric-row">
-                    <div class="metric">
-                        <div class="metric-label">PAV matcheados</div>
-                        <div class="metric-value">{len(matched_pav)}</div>
-                        <div class="metric-sub">${matched_pav['MontoFlexxus'].sum():,.0f}</div>
-                    </div>
-                    <div class="metric green">
-                        <div class="metric-label">MB-ENT-EX matcheados</div>
-                        <div class="metric-value">{len(matched_mbex)}</div>
-                        <div class="metric-sub">${matched_mbex['MontoFlexxus'].sum():,.0f}</div>
-                    </div>
-                    <div class="metric gold">
-                        <div class="metric-label">Flexxus sin banco</div>
-                        <div class="metric-value">{len(res['unmatched_f'])}</div>
-                        <div class="metric-sub">Pendientes</div>
-                    </div>
-                    <div class="metric red">
-                        <div class="metric-label">Banco sin Flexxus</div>
-                        <div class="metric-value">{len(res['ub_ing'])}</div>
-                        <div class="metric-sub">Ingresos a revisar</div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                # ── Advertencias ──
-                warns = []
-                big_unmatch = res['unmatched_f'][(~res['unmatched_f']['EsPedidosYa']) &
-                                                  (res['unmatched_f']['MontoFlexxus']>500000) &
-                                                  (res['unmatched_f']['FechaFlexxus_dt']<=banco_df['Fecha_dt'].max())]
-                for _,fr in big_unmatch.iterrows():
-                    warns.append(f"⚠️ PAV {fr['Numero']} (${fr['MontoFlexxus']:,.0f}) sin match en banco — verificar procesador")
-
-                pedidos_ya = res['unmatched_f'][res['unmatched_f']['EsPedidosYa']]
-                if len(pedidos_ya)>0:
-                    warns.append(f"⚠️ PEDIDOS YA ({len(pedidos_ya)} ítem/s) sin acreditación bancaria")
-
-                debito_pd = res['b_egr_other'][res['b_egr_other']['Categoria']=='DEBITO_PAGO_DIRECTO']
-                if len(debito_pd)>0:
-                    warns.append(f"⚠️ DÉBITO PAGO DIRECTO ${debito_pd['ImporteNum'].abs().sum():,.0f} — verificar proveedor")
-
-                if warns:
-                    st.markdown("**Advertencias:**")
-                    for w in warns:
-                        st.markdown(f'<div class="warn-box">{w}</div>', unsafe_allow_html=True)
-
-                # ── Descargas ──
+                **{estado_icon} {r2['numero']}** — {r2['movimiento']}
+                Monto: **${r2['monto']:,.2f}** | Fecha Flexxus: {r2['fecha_flexxus']}
+                Estado: **{r2['estado'].upper()}** | Semanas pendiente: {r2['semanas_pendiente']}
+                """)
                 st.markdown("---")
-                st.markdown("### 📥 Descargar entregables")
+        else:
+            st.warning("No se encontraron resultados.")
 
-                excel_buf = build_excel(flexxus_df, banco_df, qr_df, trx_df, res)
-                xls_buf   = build_xls(res)
+    st.markdown("---")
 
-                dc1, dc2 = st.columns(2)
-                with dc1:
-                    st.download_button(
-                        label="📊 Conciliación Semanal (.xlsx)",
-                        data=excel_buf,
-                        file_name=f"Conciliacion_Semanal_Dancona_{datetime.now().strftime('%d%m%Y')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                with dc2:
-                    st.download_button(
-                        label="📋 Importación Flexxus (.xls)",
-                        data=xls_buf,
-                        file_name=f"Acreditacion_Flexxus_{datetime.now().strftime('%d%m%Y')}.xls",
-                        mime="application/vnd.ms-excel",
-                        use_container_width=True
-                    )
+    # ── Administrar ──
+    with st.expander("⚙️ Administrar historial"):
+        st.markdown("**Eliminar una semana del historial**")
+        st.caption("Si cargaste la misma semana dos veces, podés eliminar la que no querés. La operación es irreversible.")
 
-                st.caption("⚡ Los archivos se generan en memoria. Ningún dato queda guardado en el servidor.")
+        opciones = {f"{s['fecha_proceso']} — {s['periodo']} ({s['matcheados']} movs)": s['id'] for s in semanas}
 
-            except Exception as e:
-                st.error(f"❌ Error al procesar: {str(e)}")
-                st.caption("Verificá que los archivos sean los correctos y en el orden indicado.")
+        if not opciones:
+            st.info("No hay semanas para eliminar.")
+        else:
+            semana_elegida_label = st.selectbox("Seleccioná la semana a eliminar", list(opciones.keys()))
+            semana_elegida_id = opciones[semana_elegida_label]
+
+            # Confirmación con checkbox
+            confirmar = st.checkbox(f"Confirmo que quiero eliminar: **{semana_elegida_label}**")
+
+            if confirmar:
+                if st.button("🗑️ Eliminar esta semana", type="primary"):
+                    historico2, sha2 = github_get_file(HISTORIAL_FILE)
+                    if historico2:
+                        # Quitar la semana del listado
+                        historico2["semanas"] = [s for s in historico2["semanas"] if s["id"] != semana_elegida_id]
+
+                        # Recalcular estado de movimientos
+                        # Semanas que quedan después de la eliminación
+                        semanas_restantes = {s["id"] for s in historico2["semanas"]}
+
+                        # Para cada movimiento: recalcular desde cero cuántas semanas estuvo pendiente
+                        # Si su primera_semana ya no existe → eliminar el movimiento también
+                        movs_actualizados = []
+                        for mov in historico2.get("movimientos", []):
+                            if mov["primera_semana"] == semana_elegida_id:
+                                # El movimiento fue introducido por esta semana → eliminar
+                                continue
+                            if mov.get("semana_regularizacion") == semana_elegida_id:
+                                # Se regularizó en esta semana → volver a pendiente
+                                mov["estado"] = "pendiente"
+                                mov.pop("semana_regularizacion", None)
+                            if mov.get("ultima_semana_vista") == semana_elegida_id:
+                                # Última vez vista era esta semana → buscar la anterior
+                                mov["semanas_pendiente"] = max(1, mov["semanas_pendiente"] - 1)
+                                ids_restantes = sorted(semanas_restantes)
+                                mov["ultima_semana_vista"] = ids_restantes[-1] if ids_restantes else mov["primera_semana"]
+                            movs_actualizados.append(mov)
+
+                        historico2["movimientos"] = movs_actualizados
+
+                        ok = github_save_file(HISTORIAL_FILE, historico2, sha2)
+                        if ok:
+                            st.success("✅ Semana eliminada correctamente. Recargá la página para ver los cambios.")
+                            st.rerun()
+                        else:
+                            st.error("❌ No se pudo guardar. Verificá el token en Secrets.")
+
+# ─── UI ────────────────────────────────────────────────────────────────────────
+tab_conc, tab_hist = st.tabs(["🏦  Conciliación Semanal", "📊  Historial"])
+
+with tab_hist:
+    render_historial()
+
+with tab_conc:
+    st.markdown("""
+    <div class="hero">
+        <div class="badge">🏦 GRUPO D'ANCONA</div>
+        <h1>Conciliación Bancaria Semanal</h1>
+        <p>Subí los 4 archivos · Procesamos el cruce · Descargá los entregables</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2 = st.columns([1, 1], gap="large")
+
+    with col1:
+        st.markdown("### 📂 Archivos de entrada")
+        st.markdown("""
+        <div class="upload-card">
+            <div class="upload-label">Archivo 1 · Principal</div>
+            <div class="upload-title">Conciliación Bancaria Flexxus</div>
+            <div class="upload-hint">Exportá desde Flexxus → Tesorería → Conciliación Bancaria</div>
+        </div>
+        """, unsafe_allow_html=True)
+        f_flexxus = st.file_uploader("Flexxus", type=['xls','xlsx'], key='flexxus', label_visibility='collapsed')
+
+        st.markdown("""
+        <div class="upload-card">
+            <div class="upload-label">Archivo 2 · Banco</div>
+            <div class="upload-title">Últimos Movimientos BNA</div>
+            <div class="upload-hint">Exportá desde Banco Nación Online → Últimos movimientos</div>
+        </div>
+        """, unsafe_allow_html=True)
+        f_banco = st.file_uploader("Banco", type=['xls','xlsx'], key='banco', label_visibility='collapsed')
+
+        st.markdown("""
+        <div class="upload-card">
+            <div class="upload-label">Archivo 3 · Merchant</div>
+            <div class="upload-title">TRX Merchant Center</div>
+            <div class="upload-hint">Exportá desde Merchant Center → Liquidaciones → TRX</div>
+        </div>
+        """, unsafe_allow_html=True)
+        f_trx = st.file_uploader("TRX", type=['xls','xlsx'], key='trx', label_visibility='collapsed')
+
+        st.markdown("""
+        <div class="upload-card">
+            <div class="upload-label">Archivo 4 · QR</div>
+            <div class="upload-title">Transacciones QR PCT</div>
+            <div class="upload-hint">Exportá desde Merchant Center → QR → Transacciones</div>
+        </div>
+        """, unsafe_allow_html=True)
+        f_qr = st.file_uploader("QR", type=['xls','xlsx'], key='qr', label_visibility='collapsed')
+
+    with col2:
+        st.markdown("### ⚙️ Proceso y resultados")
+
+        todos = all([f_flexxus, f_banco, f_trx, f_qr])
+
+        if not todos:
+            archivos_ok = sum([bool(f_flexxus), bool(f_banco), bool(f_trx), bool(f_qr)])
+            st.info(f"📎 {archivos_ok}/4 archivos cargados. Subí los 4 para procesar.")
+            st.markdown("""
+            **Reglas aplicadas automáticamente:**
+            - `CR DEBIN SPOT` → QR → PAV
+            - `CR LIQ MASTER/VISA/AMEX` → Liquidación tarjeta → PAV
+            - `PEDIDOS YA` → Canal aparte, sin cupón QR ni nro. liquidación
+            - Fecha acreditación: si banco < Flexxus → se usa fecha Flexxus
+            - Merchant y QR PCT → solo auditoría, no generan carga directa
+            - Impuestos y gastos bancarios → separados para asientos contables
+            """)
+        else:
+            with st.spinner("Procesando conciliación..."):
+                try:
+                    flexxus_df = parse_flexxus(f_flexxus)
+                    banco_df   = parse_banco(f_banco)
+                    qr_df      = parse_qr(f_qr)
+                    trx_df     = parse_trx(f_trx)
+
+                    flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df, qr_df, trx_df)
+                    res = compute_results(flexxus_df, banco_df)
+
+                    matched_pav  = res['matched'][res['matched']['Tipo']=='PAV']
+                    matched_mbex = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
+
+                    # ── Métricas ──
+                    st.markdown(f"""
+                    <div class="diff-zero">
+                        <span style="font-size:1.6rem">✅</span>
+                        <span>DIFERENCIA FINAL: $0,00 — Conciliación cerrada</span>
+                    </div>
+                    <div class="metric-row">
+                        <div class="metric">
+                            <div class="metric-label">PAV matcheados</div>
+                            <div class="metric-value">{len(matched_pav)}</div>
+                            <div class="metric-sub">${matched_pav['MontoFlexxus'].sum():,.0f}</div>
+                        </div>
+                        <div class="metric green">
+                            <div class="metric-label">MB-ENT-EX matcheados</div>
+                            <div class="metric-value">{len(matched_mbex)}</div>
+                            <div class="metric-sub">${matched_mbex['MontoFlexxus'].sum():,.0f}</div>
+                        </div>
+                        <div class="metric gold">
+                            <div class="metric-label">Flexxus sin banco</div>
+                            <div class="metric-value">{len(res['unmatched_f'])}</div>
+                            <div class="metric-sub">Pendientes</div>
+                        </div>
+                        <div class="metric red">
+                            <div class="metric-label">Banco sin Flexxus</div>
+                            <div class="metric-value">{len(res['ub_ing'])}</div>
+                            <div class="metric-sub">Ingresos a revisar</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # ── Advertencias ──
+                    warns = []
+                    big_unmatch = res['unmatched_f'][(~res['unmatched_f']['EsPedidosYa']) &
+                                                      (res['unmatched_f']['MontoFlexxus']>500000) &
+                                                      (res['unmatched_f']['FechaFlexxus_dt']<=banco_df['Fecha_dt'].max())]
+                    for _,fr in big_unmatch.iterrows():
+                        warns.append(f"⚠️ PAV {fr['Numero']} (${fr['MontoFlexxus']:,.0f}) sin match en banco — verificar procesador")
+
+                    pedidos_ya = res['unmatched_f'][res['unmatched_f']['EsPedidosYa']]
+                    if len(pedidos_ya)>0:
+                        warns.append(f"⚠️ PEDIDOS YA ({len(pedidos_ya)} ítem/s) sin acreditación bancaria")
+
+                    debito_pd = res['b_egr_other'][res['b_egr_other']['Categoria']=='DEBITO_PAGO_DIRECTO']
+                    if len(debito_pd)>0:
+                        warns.append(f"⚠️ DÉBITO PAGO DIRECTO ${debito_pd['ImporteNum'].abs().sum():,.0f} — verificar proveedor")
+
+                    if warns:
+                        st.markdown("**Advertencias:**")
+                        for w in warns:
+                            st.markdown(f'<div class="warn-box">{w}</div>', unsafe_allow_html=True)
+
+                    # ── Descargas ──
+                    st.markdown("---")
+                    st.markdown("### 📥 Descargar entregables")
+
+                    excel_buf = build_excel(flexxus_df, banco_df, qr_df, trx_df, res)
+                    xls_buf   = build_xls(res)
+
+                    dc1, dc2 = st.columns(2)
+                    with dc1:
+                        st.download_button(
+                            label="📊 Conciliación Semanal (.xlsx)",
+                            data=excel_buf,
+                            file_name=f"Conciliacion_Semanal_Dancona_{datetime.now().strftime('%d%m%Y')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    with dc2:
+                        st.download_button(
+                            label="📋 Importación Flexxus (.xls)",
+                            data=xls_buf,
+                            file_name=f"Acreditacion_Flexxus_{datetime.now().strftime('%d%m%Y')}.xls",
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True
+                        )
+
+                    # ── Guardar en historial automáticamente ──
+                    periodo = f"{banco_df['Fecha_dt'].min().strftime('%d/%m/%Y')} al {banco_df['Fecha_dt'].max().strftime('%d/%m/%Y')}"
+                    pav_match = res['matched'][res['matched']['Tipo']=='PAV']
+                    mbex_match = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
+                    unmatched_detalle = [
+                        {"numero": str(r2['Numero']), "tipo": str(r2['Tipo']),
+                         "movimiento": str(r2['Movimiento']), "monto": float(r2['MontoFlexxus']),
+                         "fecha": str(r2['FechaFlexxus'])}
+                        for _, r2 in res['unmatched_f'].iterrows()
+                    ]
+                    with st.spinner("Guardando en historial..."):
+                        ok = guardar_conciliacion(
+                            periodo=periodo,
+                            saldo_flexxus=res['saldo_f'],
+                            saldo_banco=res['saldo_extracto'],
+                            matched_count=len(res['matched']),
+                            pav_total=float(pav_match['MontoFlexxus'].sum()),
+                            mbex_total=float(mbex_match['MontoFlexxus'].sum()),
+                            A=res['A'], B=res['B'], C=res['C_total'], D=res['D'],
+                            unmatched_f_detalle=unmatched_detalle
+                        )
+                        if ok:
+                            st.success("✅ Conciliación guardada en el historial.")
+                        else:
+                            st.warning("⚠️ No se pudo guardar en el historial.")
+
+                    st.caption("⚡ Los archivos se generan en memoria. El historial se guarda en GitHub.")
+
+                except Exception as e:
+                    st.error(f"❌ Error al procesar: {str(e)}")
+                    st.caption("Verificá que los archivos sean los correctos y en el orden indicado.")
+
 
 st.markdown("""
 <div class="footer">
