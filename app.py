@@ -566,44 +566,33 @@ def build_excel(flexxus, bank, qr, trx, r):
         local = ''; cupon = ''; num_liq = ''; monto_comp = ''; diferencia = ''
 
         if fr['EsPedidosYa']:
-            local = LOCAL_MAP.get('', '')
+            pass  # PEDIDOS YA: sin cupón QR ni liquidación
         else:
-            # Buscar en QR PCT (neto = monto Flexxus con tolerancia 1%)
-            key_qr = round(monto, 2)
             # Buscar mejor candidato QR (tolerancia 2%)
-            qr_match = None
-            best_diff = float('inf')
+            qr_match = None; best_diff_qr = float('inf')
             for k, v in qr_list:
                 diff = abs(k - monto)
-                if diff < best_diff and diff <= monto * 0.02:
-                    best_diff = diff
-                    qr_match = v
-            if qr_match is not None:
+                if diff < best_diff_qr and diff <= monto * 0.02:
+                    best_diff_qr = diff; qr_match = v
+
+            # Buscar mejor candidato TRX (tolerancia 2%)
+            trx_match = None; best_diff_trx = float('inf')
+            for k, v in trx_by_monto.items():
+                diff = abs(k - monto)
+                if diff < best_diff_trx and diff <= monto * 0.02:
+                    best_diff_trx = diff; trx_match = v
+
+            # Usar el match con menor diferencia
+            if qr_match is not None and (trx_match is None or best_diff_qr <= best_diff_trx):
                 local = LOCAL_MAP.get(str(qr_match['CodComercio']), str(qr_match['CodComercio']))
                 cupon = str(qr_match.get('Cupon', qr_match['IdQR'])).strip()
                 monto_comp = round(qr_match['NetoQR'], 2)
                 diferencia = round(monto - monto_comp, 2)
-            else:
-                # Buscar en TRX Merchant
-                key_trx = round(monto, 2)
-                trx_match = trx_by_monto.get(key_trx)
-                if trx_match is None:
-                    for k, v in trx_by_monto.items():
-                        if abs(k - monto) <= 1.0:
-                            trx_match = v; break
-                if trx_match is None:
-                    # Buscar mejor candidato TRX (tolerancia 2%)
-                    best_diff2 = float('inf')
-                    for k, v in trx_by_monto.items():
-                        diff = abs(k - monto)
-                        if diff < best_diff2 and diff <= monto * 0.02:
-                            best_diff2 = diff
-                            trx_match = v
-                if trx_match is not None:
-                    local = LOCAL_MAP.get(str(trx_match['COMERCIO']), str(trx_match['COMERCIO']))
-                    num_liq = str(trx_match['NUMERO LIQUIDACION'])
-                    monto_comp = round(trx_match['MontoNeto'], 2)
-                    diferencia = round(monto - monto_comp, 2)
+            elif trx_match is not None:
+                local = LOCAL_MAP.get(str(trx_match['COMERCIO']), str(trx_match['COMERCIO']))
+                num_liq = str(trx_match['NUMERO LIQUIDACION'])
+                monto_comp = round(trx_match['MontoNeto'], 2)
+                diferencia = round(monto - monto_comp, 2)
 
         dw(ws3,rn,[fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],fr['Movimiento'],
                    monto,local,cupon,num_liq,
