@@ -16,21 +16,6 @@
       "diferencia_final": 0.0
     },
     {
-      "id": "20260428_145000",
-      "fecha_proceso": "28/04/2026 14:50",
-      "periodo": "27/04/2026 al 27/04/2026",
-      "saldo_flexxus": 24996327.79,
-      "saldo_banco": 27584507.39,
-      "matcheados": 77,
-      "pav_total": 5928241.73,
-      "mbex_total": 12361420.0,
-      "C1_flexxus_no_banco": 139435.05,
-      "C2_egresos_no_banco": 0.0,
-      "C3_banco_no_flexxus": 4581224.42,
-      "C4_egresos_banco": 184284.9,
-      "diferencia_final": -1669324.87
-    },
-    {
       "id": "20260428_161743",
       "fecha_proceso": "28/04/2026 16:17",
       "periodo": "27/04/2026 al 27/04/2026",
@@ -61,41 +46,7 @@
       "diferencia_final": -1669324.87
     }
   ],
-  "movimientos": [
-    {
-      "numero": "1800042763",
-      "tipo": "PAV",
-      "movimiento": "PAGO TARJETA CREDITO",
-      "monto": 38886.97,
-      "fecha_flexxus": "21/04/2026",
-      "primera_semana": "20260428_145000",
-      "ultima_semana_vista": "20260428_161801",
-      "semanas_pendiente": 4,
-      "estado": "pendiente"
-    },
-    {
-      "numero": "2300013968",
-      "tipo": "PAV",
-      "movimiento": "PAGO TARJETA CREDITO",
-      "monto": 68461.47,
-      "fecha_flexxus": "21/04/2026",
-      "primera_semana": "20260428_145000",
-      "ultima_semana_vista": "20260428_161801",
-      "semanas_pendiente": 4,
-      "estado": "pendiente"
-    },
-    {
-      "numero": "2300014058",
-      "tipo": "PAV",
-      "movimiento": "PAGO TARJETA CREDITO",
-      "monto": 32086.61,
-      "fecha_flexxus": "24/04/2026",
-      "primera_semana": "20260428_145000",
-      "ultima_semana_vista": "20260428_161801",
-      "semanas_pendiente": 4,
-      "estado": "pendiente"
-    }
-  ],
+  "movimientos": [],
   "tipo_mappings": {
     "": "Ignorar (no incluir)"
   }
