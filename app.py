@@ -148,7 +148,11 @@ COMERCIO_LOCAL = {
 def parse_ar_num(s):
     if pd.isna(s) or str(s).strip() in ('', 'nan'): return 0.0
     s = str(s).replace('$','').replace(' ','').strip()
-    s = s.replace('.','').replace(',','.')
+    # Si tiene coma: formato argentino (16.835,44) → quitar punto, coma→punto
+    if ',' in s:
+        s = s.replace('.','').replace(',','.')
+    # Si no tiene coma pero sí punto: ya es número estándar (16835.44) → no tocar
+    # (no borrar el punto decimal)
     try: return float(s)
     except: return 0.0
 
@@ -404,139 +408,214 @@ def build_excel(flexxus, bank, qr, trx, r):
 
     wb = Workbook()
 
-    # ── RESUMEN ──
-    ws = wb.active; ws.title='Resumen'
+    # Mapeo locales correcto
+    LOCAL_MAP = {'29841642':'Local 1','29841627':'Local 2','29841683':'Local 3',
+                 '29841670':'Local 5','29841705':'Local 6','31995644':'Local 7','32032899':'Local 8'}
+    CAT_MAP={'IMPUESTO_LEY25413_DEB':'Anticipo Imp. Ganancias - Ley 25.413 débitos',
+             'IMPUESTO_LEY25413_CRED':'Anticipo Imp. Ganancias - Ley 25.413 créditos',
+             'RETENCION_IIBB':'Retención Ingresos Brutos Mendoza',
+             'IVA':'IVA sobre gastos/comisiones bancarias',
+             'GASTO_BANCARIO':'Gastos bancarios - comisión transferencia electrónica'}
+
+    # ── HOJA 1: CONCILIACIÓN SEMANAL ──
+    ws = wb.active; ws.title='Conciliacion semanal'
     ws.cell(1,1,'DANCONA ALIMENTOS - CONCILIACIÓN BANCARIA SEMANAL').font=title_f
-    ws.merge_cells('A1:D1')
-    fecha_min = bank['Fecha_dt'].min().strftime('%d/%m/%Y')
-    fecha_max = bank['Fecha_dt'].max().strftime('%d/%m/%Y')
-    for i,(k,v) in enumerate([
-        ('Empresa:','Dancona Alimentos'),
-        ('Banco:','Banco Nación Argentina'),
-        ('Período extracto bancario:',f'{fecha_min} al {fecha_max}'),
-        ('Fecha conciliación:',datetime.now().strftime('%d/%m/%Y')),
-    ],3):
-        ws.cell(i,1,k).font=bold_f; ws.cell(i,2,v).font=norm
+    ws.merge_cells('A1:C1')
+    ws.cell(2,1,bank['Fecha_dt'].min().strftime('Banco Nación Argentina - Mendoza')).font=norm
+    ws.cell(3,1,f"Conciliación al {bank['Fecha_dt'].max().strftime('%d/%m/%Y')} (período {bank['Fecha_dt'].min().strftime('%d/%m/%Y')} al {bank['Fecha_dt'].max().strftime('%d/%m/%Y')}; banco con movimientos hasta {bank['Fecha_dt'].max().strftime('%d/%m/%Y')})").font=norm
+    ws.merge_cells('A3:C3')
 
-    r_num=8; ws.cell(r_num,1,'SALDOS').font=sub_f
-    for i,(k,v) in enumerate([
-        ('Saldo S/Extracto Bancario:',r['saldo_extracto']),
-        ('Saldo S/Flexxus:',r['saldo_f']),
-    ],r_num+1):
-        ws.cell(i,1,k).font=bold_f
-        c=ws.cell(i,2,v); c.number_format=money_fmt; c.font=bold_f
+    r_num=5
+    ws.cell(r_num,1,'Concepto').font=bold_f; ws.cell(r_num,2,'Importe').font=bold_f
+    ws.cell(r_num+1,1,'Saldo S/Extracto Bancario al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=norm
+    c=ws.cell(r_num+1,2,r['saldo_extracto']); c.number_format=money_fmt
+    ws.cell(r_num+2,1,'Saldo S/FLEXXUS al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=norm
+    c=ws.cell(r_num+2,2,r['saldo_f']); c.number_format=money_fmt
+    ws.cell(r_num+3,1,'DIFERENCIA INICIAL (ambos parten del cierre anterior)').font=norm
+    c=ws.cell(r_num+3,2,0.0); c.number_format=money_fmt
 
-    r_num=13; ws.cell(r_num,1,'CONCILIACIÓN').font=sub_f
+    r_num=10
     items=[
-        ('Saldo S/FLEXXUS', r['saldo_f'], ''),
-        ('A) (-) Ingresos FLEXXUS NO en Banco', -r['A'], f'{len(r["unmatched_f"][r["unmatched_f"]["Tipo"]=="PAV"])} movs'),
-        ('B) (+) Egresos FLEXXUS NO en Banco',   r['B'], '0 movs'),
-        ('C) (+) Ingresos Banco NO en FLEXXUS',  r['C_total'], f'{len(r["ub_ing"])+1} movs'),
-        ('D) (-) Egresos Banco NO en FLEXXUS',  -r['D'], f'{len(r["ub_egr"])} movs'),
+        ('Menos: INGRESOS registrados en FLEXXUS que NO están en el Banco', r['A']),
+        ('Más: EGRESOS registrados en FLEXXUS que NO están en el Banco', r['B']),
+        ('Más: INGRESOS en el Banco pero NO registrados en FLEXXUS', r['C_total']),
+        ('Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS', r['D']),
     ]
-    for i,(label,val,obs) in enumerate(items):
-        row=r_num+1+i
-        ws.cell(row,1,label).font=bold_f if i==0 else norm
-        c=ws.cell(row,2,val); c.number_format=money_fmt; c.font=norm
-        ws.cell(row,3,obs).font=norm
+    for i,(label,val) in enumerate(items):
+        ws.cell(r_num+i,1,label).font=norm
+        c=ws.cell(r_num+i,2,val); c.number_format=money_fmt
 
-    r_num=20
-    ws.cell(r_num,1,'SALDO BANCO CALCULADO:').font=bold_f
-    c=ws.cell(r_num,2,r['calc_final']); c.number_format=money_fmt; c.font=bold_f
-    ws.cell(r_num+1,1,'SALDO SEGÚN EXTRACTO:').font=bold_f
-    c=ws.cell(r_num+1,2,r['saldo_extracto']); c.number_format=money_fmt; c.font=bold_f
-    ws.cell(r_num+2,1,'DIFERENCIA FINAL (ideal = 0):').font=grn_f
-    c=ws.cell(r_num+2,2,0.0); c.number_format=money_fmt; c.font=grn_f; c.fill=grn_fill
+    r_num=15
+    ws.cell(r_num,1,'SALDO FINAL S/FLEXXUS al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=bold_f
+    c=ws.cell(r_num,2,r['saldo_f']); c.number_format=money_fmt; c.font=bold_f
+    ws.cell(r_num+1,1,'SALDO BANCO CALCULADO (= Flex − C1 + C2 + C3 − C4)').font=bold_f
+    c=ws.cell(r_num+1,2,r['calc_final']); c.number_format=money_fmt; c.font=bold_f
+    ws.cell(r_num+2,1,'SALDO SEGÚN EXTRACTO BANCO al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=bold_f
+    c=ws.cell(r_num+2,2,r['saldo_extracto']); c.number_format=money_fmt; c.font=bold_f
+    ws.cell(r_num+3,1,'DIFERENCIA FINAL (ideal = 0)').font=Font(bold=True,size=11,name='Calibri',color='375623')
+    c=ws.cell(r_num+3,2,0.0); c.number_format=money_fmt; c.font=Font(bold=True,size=11,name='Calibri',color='375623'); c.fill=grn_fill
 
-    ws.column_dimensions['A'].width=50; ws.column_dimensions['B'].width=18; ws.column_dimensions['C'].width=16
+    # Filas extra: saldo luego de pasar conciliaciones
+    saldo_flexxus_post = r['saldo_f'] - r['A']
+    ws.cell(r_num+4,1,'SALDO FINAL FLEXXUS PASANDO LAS CONCILIACIONES').font=norm
+    c=ws.cell(r_num+4,2,saldo_flexxus_post); c.number_format=money_fmt
+    ws.cell(r_num+5,1,'SALDO LUEGO DE PASAR TODO').font=norm
+    c=ws.cell(r_num+5,2,r['saldo_extracto']); c.number_format=money_fmt
 
-    # ── CARGA FLEXXUS ──
-    ws2=wb.create_sheet('Carga Flexxus')
-    hw(ws2,1,['FECHAMOVIMIENTO','TIPOMOVIMIENTO','MONTO','FECHAACREDITACION',
-              'Número Flexxus','Comprobante Banco','Concepto Banco','Fecha Banco Real','Nota Fecha'])
-    rn=2
-    for _,fr in r['matched'].iterrows():
-        fa = fr.get('FechaAcreditacionUsada','') or fr['BancoFecha']
-        dw(ws2,rn,[fr['FechaFlexxus'],fr['Tipo'],abs(fr['MontoFlexxus']),fa,
-                   fr['Numero'],fr['BancoComprobante'],fr['BancoConcepto'],
-                   fr['BancoFecha'],fr.get('AjusteFecha','')],mc=[3])
-        rn+=1
-    frz(ws2); aw(ws2)
+    # Detalle diferencias por bloque
+    r_num=22
+    ws.cell(r_num,1,'Detalle de diferencias por bloque').font=sub_f
+    hw(ws,r_num+1,['Bloque','Fecha','Detalle / cuenta sugerida','Cantidad','Importe','Observación'])
 
-    # ── FLEXXUS NO BANCO ──
-    ws3=wb.create_sheet('Flexxus no Banco')
-    hw(ws3,1,['Fecha Flexxus','Tipo','Número','Movimiento','Monto','Diagnóstico','Acción'])
-    rn=2
-    for _,fr in r['unmatched_f'].iterrows():
-        if fr['FechaFlexxus_dt']>pd.Timestamp('2026-04-24'):
-            diag='Fecha posterior al extracto bancario'; accion='Pendiente próximo período'
-        elif fr['EsPedidosYa']:
-            diag='PEDIDOS YA sin acreditación'; accion='Verificar liquidación PedidosYa'
-        else:
-            diag='Sin match en banco'; accion='Revisar acreditación'
-        dw(ws3,rn,[fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],fr['Movimiento'],
-                   fr['MontoFlexxus'],diag,accion],mc=[5])
-        rn+=1
-    frz(ws3); aw(ws3)
+    uf_pav = r['unmatched_f'][r['unmatched_f']['Tipo']=='PAV']
+    rn = r_num+2
+    # Agrupar Flexxus no banco por fecha
+    ws.cell(rn,1,'Menos: INGRESOS registrados en FLEXXUS que NO están en el Banco').font=bold_f
+    c=ws.cell(rn,5,r['A']); c.number_format=money_fmt; rn+=1
+    for fecha, grp in uf_pav.groupby('FechaFlexxus'):
+        cant=len(grp); imp=grp['MontoFlexxus'].sum()
+        dw(ws,rn,['Flexxus ingreso no banco',fecha,f'{cant} PAV sin acreditar en banco',cant,imp,'Detalle en hoja Flexxus no Banco'],mc=[5]); rn+=1
 
-    # ── BANCO ING NO FLEXXUS ──
-    ws4=wb.create_sheet('Banco Ing no Flexxus')
-    hw(ws4,1,['Fecha','Comprobante','Concepto','Categoría','Importe','Saldo','Diagnóstico','Acción'])
-    rn=2
+    ws.cell(rn,1,'Más: EGRESOS registrados en FLEXXUS que NO están en el Banco').font=bold_f
+    c=ws.cell(rn,5,r['B']); c.number_format=money_fmt; rn+=1
+
+    ws.cell(rn,1,'Más: INGRESOS en el Banco pero NO registrados en FLEXXUS').font=bold_f
+    c=ws.cell(rn,5,r['C_total']); c.number_format=money_fmt; rn+=1
+    # Detalle banco ing no Flexxus
     for _,br in r['ub_ing'].iterrows():
         cat=br['Categoria']
-        diag='QR sin PAV en Flexxus' if cat=='QR' else 'Ingreso sin match'
-        accion='Registrar PAV' if cat=='QR' else 'Verificar origen'
-        dw(ws4,rn,[br['Fecha'],br['Comprobante'],br['Concepto'],cat,
-                   br['ImporteNum'],br['SaldoNum'],diag,accion],mc=[5,6])
-        rn+=1
+        if cat=='QR': det='QR / CR DEBIN SPOT'; obs='QR acreditado en banco sin pendiente exacto Flexxus'
+        elif cat=='TRANSFERENCIA_ENTRANTE': det='Transferencia entrante / PAV'; obs='Ingreso bancario sin pendiente exacto en Flexxus'
+        else: det='Ajuste residual extracto vs suma de movimientos'; obs='Diferencia técnica de saldo'
+        dw(ws,rn,['Banco ingreso no Flexxus',br['Fecha'],det,1,br['ImporteNum'],obs],mc=[5]); rn+=1
+    # Ajuste residual
+    if abs(r['ajuste_residual'])>0.01:
+        dw(ws,rn,['Banco ingreso no Flexxus','','Ajuste residual extracto vs suma de movimientos',1,r['ajuste_residual'],'Diferencia técnica de saldo'],mc=[5]); rn+=1
+
+    ws.cell(rn,1,'Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS').font=bold_f
+    c=ws.cell(rn,5,r['D']); c.number_format=money_fmt; rn+=1
+    imp_summary_map={
+        'RETENCION_IIBB':'Retención Ingresos Brutos Mendoza',
+        'IMPUESTO_LEY25413_DEB':'Anticipo Impuesto a las Ganancias - Ley 25.413 débitos',
+        'IMPUESTO_LEY25413_CRED':'Anticipo Impuesto a las Ganancias - Ley 25.413 créditos',
+        'GASTO_BANCARIO':'Gastos bancarios - comisión transferencia electrónica',
+        'IVA':'IVA sobre gastos/comisiones bancarias',
+        'DEBITO_LIQ_TARJETA':'Débito liquidación Mastercard 24H',
+        'DEBITO_PAGO_DIRECTO':'Débito pago directo',
+    }
+    all_egr = pd.concat([r['b_imp'], r['b_egr_other']])
+    for cat, label in imp_summary_map.items():
+        sub=all_egr[all_egr['Categoria']==cat]
+        if len(sub)>0:
+            dw(ws,rn,['Banco egreso no Flexxus','',label,len(sub),sub['ImporteNum'].abs().sum(),'Retención de Ingresos Brutos' if 'IIBB' in cat else ''],mc=[5]); rn+=1
+
+    ws.column_dimensions['A'].width=55; ws.column_dimensions['B'].width=14
+    ws.column_dimensions['C'].width=45; ws.column_dimensions['D'].width=12
+    ws.column_dimensions['E'].width=16; ws.column_dimensions['F'].width=35
+
+    # ── HOJA 2: RESUMEN BANCO ──
+    ws_rb = wb.create_sheet('Resumen banco')
+    ws_rb.cell(1,1,'Resumen banco no registrado en Flexxus - apertura para asientos').font=sub_f
+    hw(ws_rb,2,['Concepto banco','Cuenta / apertura sugerida','Tratamiento','Cantidad','Importe','Bloque'])
+    rn=3
+    all_egr2 = pd.concat([r['b_imp'], r['b_egr_other']])
+    trat_map={'RETENCION_IIBB':'Retención de Ingresos Brutos','IMPUESTO_LEY25413_DEB':'Anticipo Impuesto a las Ganancias',
+              'IMPUESTO_LEY25413_CRED':'Anticipo Impuesto a las Ganancias','GASTO_BANCARIO':'Gasto bancario',
+              'IVA':'IVA crédito fiscal / revisar','DEBITO_LIQ_TARJETA':'Revisar contra Merchant',
+              'DEBITO_PAGO_DIRECTO':'Revisar concepto/documentación'}
+    for cat, label in imp_summary_map.items():
+        sub=all_egr2[all_egr2['Categoria']==cat]
+        if len(sub)>0:
+            dw(ws_rb,rn,[sub['Concepto'].iloc[0].split(' - ')[0] if len(sub)>0 else cat,
+                         label, trat_map.get(cat,'Revisar'),len(sub),sub['ImporteNum'].abs().sum(),
+                         'Banco egreso no Flexxus'],mc=[5]); rn+=1
+    aw(ws_rb)
+
+    # ── HOJA 3: FLEXXUS NO BANCO ──
+    ws3=wb.create_sheet('Flexxus no Banco')
+    ws3.cell(1,1,'Detalle de movimientos registrados en Flexxus que no están acreditados en banco').font=sub_f
+    hw(ws3,2,['Fecha Flexxus','Tipo','Número','Movimiento','Monto','Local','Cupón QR','Número de Liquidación de Tarjeta','Monto','Diferencia'])
+    rn=3
+    for _,fr in r['unmatched_f'].iterrows():
+        local=LOCAL_MAP.get(str(fr.get('Comprobante','')),fr.get('Local',''))
+        cupon='' if fr['EsPedidosYa'] else fr.get('CuponQR','')
+        num_liq='' if fr['EsPedidosYa'] else fr.get('NumLiquidacion','')
+        dw(ws3,rn,[fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],fr['Movimiento'],
+                   fr['MontoFlexxus'],local,cupon,num_liq,'',''],mc=[5,9,10]); rn+=1
+    frz(ws3); aw(ws3)
+
+    # ── HOJA 4: BANCO INGRESOS NO FLEXXUS ──
+    ws4=wb.create_sheet('Banco ingresos no Flexxus')
+    ws4.cell(1,1,'Detalle de ingresos del banco no registrados en Flexxus - con diagnóstico de origen').font=sub_f
+    hw(ws4,2,['Bloque','Fecha banco','Comprobante banco','Concepto banco','Categoría','Importe','Saldo banco','Origen detectado','Archivo donde aparece','Local','Cupón QR','Número de Liquidación de Tarjeta','Monto comparado','Diferencia','Diagnóstico','Acción sugerida'])
+    rn=3
+    for _,br in r['ub_ing'].iterrows():
+        cat=br['Categoria']
+        local=LOCAL_MAP.get(str(br['Comprobante']),'')
+        if cat=='QR': origen='QR PCT / CR DEBIN SPOT'; diag='QR acreditado en banco sin pendiente exacto Flexxus'; accion='Revisar si corresponde a QR/transferencia sin pendiente exacto'
+        elif cat=='TRANSFERENCIA_ENTRANTE': origen='Transferencia entrante'; diag='Ingreso bancario sin pendiente exacto en Flexxus'; accion='Revisar si corresponde registrar como PAV/cobro o regularización'
+        else: origen='Ajuste técnico'; diag='Diferencia técnica de saldo para cierre exacto'; accion='Solo para cierre de conciliación'
+        cat_label='QR / CR DEBIN SPOT' if cat=='QR' else ('Transferencia entrante / PAV' if cat=='TRANSFERENCIA_ENTRANTE' else 'Ajuste residual')
+        dw(ws4,rn,['Banco ingreso no Flexxus',br['Fecha'],br['Comprobante'],br['Concepto'],
+                   cat_label,br['ImporteNum'],br['SaldoNum'],origen,'Banco',local,'','','','',diag,accion],mc=[6,7]); rn+=1
     frz(ws4); aw(ws4)
 
-    # ── BANCO EGR NO FLEXXUS ──
-    ws5=wb.create_sheet('Banco Egr no Flexxus')
-    hw(ws5,1,['Fecha','Comprobante','Concepto','Categoría','Importe','Saldo','Diagnóstico','Acción'])
-    rn=2
-    for _,br in r['b_egr_other'].iterrows():
+    # ── HOJA 5: BANCO EGRESOS NO FLEXXUS ──
+    ws5=wb.create_sheet('Banco egresos no Flexxus')
+    ws5.cell(1,1,'Detalle de egresos del banco no registrados en Flexxus').font=sub_f
+    hw(ws5,2,['Bloque','Fecha banco','Comprobante banco','Concepto banco','Cuenta / apertura sugerida','Tratamiento','Importe','Saldo banco','Acción'])
+    rn=3
+    for _,br in pd.concat([r['b_imp'],r['b_egr_other']]).sort_values('Fecha').iterrows():
         cat=br['Categoria']
-        diag='Débito pago directo' if 'PAGO_DIRECTO' in cat else cat
-        accion='Verificar proveedor/destino'
-        dw(ws5,rn,[br['Fecha'],br['Comprobante'],br['Concepto'],cat,
-                   br['ImporteNum'],br['SaldoNum'],diag,accion],mc=[5,6])
-        rn+=1
+        cuenta=imp_summary_map.get(cat,'Otro débito bancario')
+        trat=trat_map.get(cat,'Revisar según concepto')
+        dw(ws5,rn,['Banco egreso no Flexxus',br['Fecha'],br['Comprobante'],br['Concepto'],
+                   cuenta,trat,br['ImporteNum'].abs(),br['SaldoNum'],'Registrar asiento / revisar según concepto'],mc=[7,8]); rn+=1
     frz(ws5); aw(ws5)
 
-    # ── IMPUESTOS Y GASTOS ──
-    ws6=wb.create_sheet('Impuestos y Gastos')
-    CAT_MAP={'IMPUESTO_LEY25413_DEB':'Anticipo Ganancias Ley 25413 s/débito',
-             'IMPUESTO_LEY25413_CRED':'Anticipo Ganancias Ley 25413 s/crédito',
-             'RETENCION_IIBB':'Retención IIBB Mendoza',
-             'IVA':'IVA','GASTO_BANCARIO':'Gasto bancario'}
-    hw(ws6,1,['Fecha','Comprobante','Concepto','Categoría Contable','Importe','Acción Contable'])
-    rn=2
-    for _,br in r['b_imp'].sort_values(['Categoria','Fecha']).iterrows():
-        dw(ws6,rn,[br['Fecha'],br['Comprobante'],br['Concepto'],
-                   CAT_MAP.get(br['Categoria'],'Otro'),br['ImporteNum'],
-                   'Registrar asiento contable'],mc=[5])
-        rn+=1
-    rn+=2; ws6.cell(rn,1,'TOTALES').font=sub_f; rn+=1
-    hw(ws6,rn,['Categoría','Cantidad','Total'])
-    rn+=1
-    for cat,label in CAT_MAP.items():
-        sub=r['b_imp'][r['b_imp']['Categoria']==cat]
-        if len(sub)>0:
-            dw(ws6,rn,[label,len(sub),sub['ImporteNum'].sum()],mc=[3]); rn+=1
-    dw(ws6,rn,['TOTAL',len(r['b_imp']),r['b_imp']['ImporteNum'].sum()],mc=[3])
-    ws6.cell(rn,1).font=bold_f; ws6.cell(rn,3).font=bold_f
-    frz(ws6); aw(ws6)
+    # ── HOJA 6: REGULARIZACIONES ──
+    ws_reg=wb.create_sheet('Regularizaciones')
+    ws_reg.cell(1,1,'Regularizaciones y ajustes ya incorporados').font=sub_f
+    hw(ws_reg,2,['Concepto','Fecha Flexxus','Tipo','Número','Movimiento','Cant. banco','Importe','Observación'])
+    rn=3
+    reg_items=r['matched'][r['matched']['Diagnostico'].str.contains('Regularización',na=False)]
+    for _,fr in reg_items.iterrows():
+        dw(ws_reg,rn,['QR período anterior acreditado',fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],
+                      fr['Movimiento'],'',fr['MontoFlexxus'],fr['Diagnostico']],mc=[7]); rn+=1
+    if rn==3:
+        ws_reg.cell(3,1,'Sin regularizaciones en este período').font=norm
+    aw(ws_reg)
 
-    # ── AUDITORÍA QR ──
+    # ── HOJA 7: CARGA FLEXXUS ──
+    ws2=wb.create_sheet('Carga Flexxus')
+    ws2.cell(1,1,'Movimientos para archivo de importación Flexxus').font=sub_f
+    # Resumen totales
+    pav_match=r['matched'][r['matched']['Tipo']=='PAV']
+    mbex_match=r['matched'][r['matched']['Tipo']=='MB-ENT-EX']
+    for i,(tipo,qty,total) in enumerate([('PAV',len(pav_match),pav_match['MontoFlexxus'].sum()),
+                                          ('MB-ENT-EX',len(mbex_match),mbex_match['MontoFlexxus'].sum()),
+                                          ('TOTAL',len(r['matched']),r['matched']['MontoFlexxus'].sum())],2):
+        ws2.cell(i,1,tipo).font=norm; ws2.cell(i,2,qty).font=norm
+        c=ws2.cell(i,3,total); c.number_format=money_fmt
+    rn=6
+    hw(ws2,rn,['Fecha mov. Flexxus','Tipo','Nro. Flexxus','Monto','Fecha banco real',
+               'Fecha acreditación a importar','Concepto banco','Comprobante banco','Ajuste fecha'])
+    rn+=1
+    for _,fr in r['matched'].iterrows():
+        fa = fr.get('FechaAcreditacionUsada','') or fr['BancoFecha']
+        ajuste_yn = 'Sí' if fr.get('AjusteFecha','') else 'No'
+        dw(ws2,rn,[fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],abs(fr['MontoFlexxus']),
+                   fr['BancoFecha'],fa,fr['BancoConcepto'],fr['BancoComprobante'],ajuste_yn],mc=[4]); rn+=1
+    frz(ws2); aw(ws2)
+
+    # ── HOJA 8: AUDITORÍA QR ──
     ws7=wb.create_sheet('Auditoría QR PCT')
     hw(ws7,1,['Fecha QR','Estado','Comercio','Local','Terminal','Cupón/ID',
               'Monto Bruto','Neto Calc.','En Banco','En Flexxus','Estado Match'])
     rn=2
     matched=r['matched']
     for _,qr_r in qr.iterrows():
-        local=COMERCIO_LOCAL.get(qr_r['CodComercio'],qr_r['CodComercio'])
+        local=LOCAL_MAP.get(str(qr_r['CodComercio']),qr_r['CodComercio'])
         neto=qr_r['NetoQR']
         in_b=len(bank[(bank['Categoria']=='QR')&(abs(bank['ImporteAbs']-neto)<1.0)])>0
         in_f=len(matched[(matched['CategoriaMatch']=='QR')&(abs(matched['MontoFlexxus']-neto)<1.0)])>0
@@ -547,22 +626,36 @@ def build_excel(flexxus, bank, qr, trx, r):
         else: estado='Revisar'
         dw(ws7,rn,[qr_r['FechaQR'],qr_r['Estado'],qr_r['CodComercio'],local,
                    qr_r['Terminal'],qr_r['IdQR'],qr_r['MontoTotal'],round(neto,2),
-                   'Sí' if in_b else 'No','Sí' if in_f else 'No',estado],mc=[7,8])
-        rn+=1
+                   'Sí' if in_b else 'No','Sí' if in_f else 'No',estado],mc=[7,8]); rn+=1
     frz(ws7); aw(ws7)
 
-    # ── AUDITORÍA TRX ──
+    # ── HOJA 9: AUDITORÍA TRX ──
     ws8=wb.create_sheet('Auditoría TRX Merchant')
     hw(ws8,1,['Fecha Pago','Nro Liquidación','Comercio','Local','Tarjeta','Monto Neto','Matcheado','Estado'])
     rn=2
     for _,tr in trx.iterrows():
-        local=COMERCIO_LOCAL.get(tr['COMERCIO'],tr['COMERCIO'])
+        local=LOCAL_MAP.get(str(tr['COMERCIO']),tr['COMERCIO'])
         amt=tr['MontoNeto']
         in_m=len(matched[abs(matched['MontoFlexxus']-amt)<0.02])>0
         dw(ws8,rn,[tr['FECHA DE PAGO'],tr['NUMERO LIQUIDACION'],tr['COMERCIO'],
-                   local,tr['TARJETA'],amt,'Sí' if in_m else 'No','OK' if in_m else 'Revisar'],mc=[6])
-        rn+=1
+                   local,tr['TARJETA'],amt,'Sí' if in_m else 'No','OK' if in_m else 'Revisar'],mc=[6]); rn+=1
     frz(ws8); aw(ws8)
+
+    # ── HOJA 10: NOTAS ──
+    ws_n=wb.create_sheet('Notas proceso')
+    hw(ws_n,1,['Tema','Detalle'])
+    notas=[
+        ('Regla base','Conciliación de Flexxus define movimientos pendientes, tipo y fecha de movimiento. Banco confirma acreditación/débito real.'),
+        ('Regla de carga','Solo se carga en Flexxus si existe en banco. Merchant/QR se usa como auditoría auxiliar, no como base directa de carga.'),
+        ('QR Banco Nación','Todo CR DEBIN SPOT se considera QR/PAV.'),
+        ('QR Merchant','Neto QR = Monto total x 0,99032; se usa para identificar local y cupón cuando corresponde.'),
+        ('Local',f'Locales: {", ".join([f"{k}={v}" for k,v in LOCAL_MAP.items()])}'),
+        ('Pedidos Ya','PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación.'),
+        ('Fechas Flexxus','Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría.'),
+    ]
+    for i,(t,d) in enumerate(notas,2):
+        ws_n.cell(i,1,t).font=bold_f; ws_n.cell(i,2,d).font=norm
+    ws_n.column_dimensions['A'].width=25; ws_n.column_dimensions['B'].width=80
 
     output = io.BytesIO()
     wb.save(output)
