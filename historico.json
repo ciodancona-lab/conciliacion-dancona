@@ -47,6 +47,22 @@
       "C3_banco_no_flexxus": 4388358.17,
       "C4_egresos_banco": 2497923.31,
       "diferencia_final": 4.23
+    },
+    {
+      "id": "20260428_192728",
+      "fecha_proceso": "28/04/2026 19:27",
+      "periodo": "27/04/2026 al 27/04/2026",
+      "saldo_flexxus": 24996327.79,
+      "saldo_banco": 27584507.39,
+      "matcheados": 71,
+      "pav_total": 5928241.73,
+      "mbex_total": 12361420.0,
+      "mbext_total": 0.0,
+      "C1_flexxus_no_banco": 139435.05,
+      "C2_egresos_no_banco": 0.0,
+      "C3_banco_no_flexxus": 4581224.42,
+      "C4_egresos_banco": 184284.9,
+      "diferencia_final": -1669324.87
     }
   ],
   "movimientos": [
@@ -59,7 +75,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042763",
@@ -68,8 +85,8 @@
       "monto": 38886.97,
       "fecha_flexxus": "21/04/2026",
       "primera_semana": "20260428_192328",
-      "ultima_semana_vista": "20260428_192559",
-      "semanas_pendiente": 3,
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 4,
       "estado": "pendiente"
     },
     {
@@ -79,8 +96,8 @@
       "monto": 68461.47,
       "fecha_flexxus": "21/04/2026",
       "primera_semana": "20260428_192328",
-      "ultima_semana_vista": "20260428_192559",
-      "semanas_pendiente": 3,
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 4,
       "estado": "pendiente"
     },
     {
@@ -92,7 +109,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2200022628",
@@ -103,7 +121,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2200022634",
@@ -114,7 +133,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058091",
@@ -125,7 +145,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1700036959",
@@ -136,7 +157,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1700036960",
@@ -147,7 +169,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1900042953",
@@ -158,7 +181,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2200022644",
@@ -169,7 +193,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014128",
@@ -180,7 +205,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068554",
@@ -191,7 +217,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068555",
@@ -202,7 +229,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068556",
@@ -213,7 +241,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014138",
@@ -224,7 +253,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014139",
@@ -235,7 +265,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014140",
@@ -246,7 +277,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014141",
@@ -257,7 +289,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014142",
@@ -268,7 +301,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1700036970",
@@ -279,7 +313,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042859",
@@ -290,7 +325,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068572",
@@ -301,7 +337,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014155",
@@ -312,7 +349,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068582",
@@ -323,7 +361,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2200022650",
@@ -334,7 +373,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058108",
@@ -345,7 +385,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2200022661",
@@ -356,7 +397,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2200022660",
@@ -367,7 +409,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058111",
@@ -378,7 +421,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058122",
@@ -389,7 +433,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058129",
@@ -400,7 +445,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014179",
@@ -411,7 +457,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1700036996",
@@ -422,7 +469,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1700036998",
@@ -433,7 +481,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058148",
@@ -444,7 +493,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2100058151",
@@ -455,7 +505,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042909",
@@ -466,7 +517,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042910",
@@ -477,7 +529,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042911",
@@ -488,7 +541,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042912",
@@ -499,7 +553,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042913",
@@ -510,7 +565,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042915",
@@ -521,7 +577,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042916",
@@ -532,7 +589,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042919",
@@ -543,7 +601,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042920",
@@ -554,7 +613,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "1800042921",
@@ -565,7 +625,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014204",
@@ -576,7 +637,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "2300014211",
@@ -587,7 +649,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068640",
@@ -598,7 +661,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068641",
@@ -609,7 +673,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068642",
@@ -620,7 +685,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068643",
@@ -631,7 +697,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068644",
@@ -642,7 +709,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068646",
@@ -653,7 +721,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068647",
@@ -664,7 +733,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068648",
@@ -675,7 +745,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068649",
@@ -686,7 +757,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068650",
@@ -697,7 +769,8 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
-      "estado": "pendiente"
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
     },
     {
       "numero": "3400068657",
@@ -708,6 +781,84 @@
       "primera_semana": "20260428_192328",
       "ultima_semana_vista": "20260428_192559",
       "semanas_pendiente": 3,
+      "estado": "regularizado",
+      "semana_regularizacion": "20260428_192728"
+    },
+    {
+      "numero": "2300014058",
+      "tipo": "PAV",
+      "movimiento": "PAGO TARJETA CREDITO",
+      "monto": 32086.61,
+      "fecha_flexxus": "24/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
+      "estado": "pendiente"
+    },
+    {
+      "numero": "0000-00026811",
+      "tipo": "MB-EXT",
+      "movimiento": "EXTRACCION - Retención Ingresos Brutos Mendoza",
+      "monto": 407424.17,
+      "fecha_flexxus": "27/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
+      "estado": "pendiente"
+    },
+    {
+      "numero": "0000-00026812",
+      "tipo": "MB-EXT",
+      "movimiento": "EXTRACCION - Anticipo Impuesto a las Ganancias - Ley 25.413 déb",
+      "monto": 106472.89,
+      "fecha_flexxus": "27/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
+      "estado": "pendiente"
+    },
+    {
+      "numero": "0000-00026813",
+      "tipo": "MB-EXT",
+      "movimiento": "EXTRACCION - Anticipo Impuesto a las Ganancias - Ley 25.413 cré",
+      "monto": 244454.46,
+      "fecha_flexxus": "27/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
+      "estado": "pendiente"
+    },
+    {
+      "numero": "0000-00026814",
+      "tipo": "MB-EXT",
+      "movimiento": "EXTRACCION - Gastos bancarios - comisión transferencia electrón",
+      "monto": 2868.0,
+      "fecha_flexxus": "27/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
+      "estado": "pendiente"
+    },
+    {
+      "numero": "0000-00026815",
+      "tipo": "MB-EXT",
+      "movimiento": "EXTRACCION - IVA sobre gastos/comisiones bancarias",
+      "monto": 602.28,
+      "fecha_flexxus": "27/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
+      "estado": "pendiente"
+    },
+    {
+      "numero": "0000-00026816",
+      "tipo": "MB-EXT",
+      "movimiento": "EXTRACCION - Débito liquidación Mastercard 24H",
+      "monto": 1508.13,
+      "fecha_flexxus": "27/04/2026",
+      "primera_semana": "20260428_192728",
+      "ultima_semana_vista": "20260428_192728",
+      "semanas_pendiente": 1,
       "estado": "pendiente"
     }
   ],
