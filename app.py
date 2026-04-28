@@ -163,6 +163,7 @@ def classify_bank(concepto):
     c = str(concepto).upper()
     if 'CR DEBIN SPOT' in c:                   return 'QR'
     elif 'CR LIQ' in c:                         return 'LIQUIDACION_TARJETA'
+    elif 'AMEX' in c and 'CR' in c:             return 'LIQUIDACION_TARJETA'
     elif 'DEB LIQ' in c:                        return 'DEBITO_LIQ_TARJETA'
     elif 'GRAVAMEN LEY 25413 S/DEB' in c:       return 'IMPUESTO_LEY25413_DEB'
     elif 'GRAVAMEN LEY 25413 S/CRED' in c:      return 'IMPUESTO_LEY25413_CRED'
@@ -233,6 +234,52 @@ def parse_flexxus(file):
     df_out.attrs['last_saldo_all'] = last_saldo_all
     df_out.attrs['unknown_types'] = unknown_types
     return df_out
+
+def parse_prev_conciliacion(file):
+    """Lee el Excel de la conciliación anterior y extrae los datos clave para trazabilidad."""
+    try:
+        wb_prev = pd.read_excel(file, sheet_name='Conciliacion semanal', dtype=str, header=None)
+        prev = {}
+
+        # Buscar saldo extracto banco (fila que diga "Saldo S/Extracto")
+        for _, row in wb_prev.iterrows():
+            r0 = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
+            r1 = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ''
+            if 'Extracto Bancario' in r0:
+                try: prev['saldo_extracto_anterior'] = float(r1.replace('.','').replace(',','.'))
+                except: pass
+            if 'FLEXXUS' in r0 and 'FINAL' in r0:
+                try: prev['saldo_flexxus_anterior'] = float(r1.replace('.','').replace(',','.'))
+                except: pass
+            if 'DIFERENCIA FINAL' in r0:
+                try: prev['diferencia_anterior'] = float(r1.replace('.','').replace(',','.'))
+                except: pass
+            if 'Conciliación al' in r0 or 'período' in r0.lower():
+                prev['periodo_anterior'] = r0
+
+        # Leer pendientes (hoja Flexxus no Banco)
+        try:
+            fnb = pd.read_excel(file, sheet_name='Flexxus no Banco', dtype=str, header=1)
+            pendientes = []
+            for _, row in fnb.iterrows():
+                num = str(row.get('Número','')).strip()
+                mov = str(row.get('Movimiento','')).strip()
+                fecha = str(row.get('Fecha Flexxus','')).strip()
+                monto_raw = str(row.get('Monto','')).strip()
+                try:
+                    monto = float(monto_raw.replace('.','').replace(',','.'))
+                except:
+                    continue
+                if num and num != 'nan' and monto > 0:
+                    pendientes.append({'numero': num, 'movimiento': mov,
+                                       'fecha': fecha, 'monto': monto})
+            prev['pendientes_semana_anterior'] = pendientes
+        except:
+            prev['pendientes_semana_anterior'] = []
+
+        return prev
+    except Exception as e:
+        return {'error': str(e)}
 
 def parse_banco(file):
     df = pd.read_excel(file, dtype=str)
@@ -312,7 +359,7 @@ def run_conciliacion(flexxus, bank, qr, trx):
             best = None; best_diff = pd.Timedelta(days=999)
             for bidx in avail_list:
                 b_amt = bank.loc[bidx,'ImporteAbs']
-                if abs(b_amt - monto) < 0.02:
+                if abs(b_amt - monto) < 1.00:
                     diff = abs(bank.loc[bidx,'Fecha_dt'] - fecha_f)
                     if diff < best_diff:
                         best_diff = diff; best = bidx
@@ -323,7 +370,7 @@ def run_conciliacion(flexxus, bank, qr, trx):
                 flexxus.loc[idx,'BancoComprobante']  = b['Comprobante']
                 flexxus.loc[idx,'BancoConcepto']     = b['Concepto']
                 flexxus.loc[idx,'BancoImporte']      = b['ImporteNum']
-                flexxus.loc[idx,'Diferencia']        = round(abs(b['ImporteNum']) - monto, 2)
+                flexxus.loc[idx,'Diferencia']        = round(b['ImporteNum'] - monto, 2)
                 flexxus.loc[idx,'CategoriaMatch']    = b['Categoria']
                 # Enrich QR/TRX
                 if b['Categoria'] == 'QR':
@@ -367,7 +414,7 @@ def run_conciliacion(flexxus, bank, qr, trx):
         best = None; best_diff = pd.Timedelta(days=999)
         for bidx in bank_egr_avail:
             b_amt = bank.loc[bidx,'ImporteAbs']
-            if abs(b_amt - monto) < 0.02:
+            if abs(b_amt - monto) < 1.00:
                 diff = abs(bank.loc[bidx,'Fecha_dt'] - fecha_f)
                 if diff < best_diff:
                     best_diff = diff; best = bidx
@@ -378,7 +425,7 @@ def run_conciliacion(flexxus, bank, qr, trx):
             flexxus.loc[idx,'BancoComprobante']   = b['Comprobante']
             flexxus.loc[idx,'BancoConcepto']      = b['Concepto']
             flexxus.loc[idx,'BancoImporte']       = b['ImporteNum']
-            flexxus.loc[idx,'Diferencia']         = 0.0
+            flexxus.loc[idx,'Diferencia']         = round(b['ImporteNum'] + monto, 2)  # egreso: banco negativo + monto positivo
             flexxus.loc[idx,'CategoriaMatch']     = b['Categoria']
             flexxus.loc[idx,'Diagnostico']        = 'OK - MB-EXT match exacto'
             # Fecha: si banco < Flexxus usar fecha Flexxus
@@ -454,20 +501,19 @@ def compute_results(flexxus, bank):
     C_base = ub_ing['ImporteNum'].sum()
     D = ub_egr['ImporteNum'].abs().sum()
 
-    calc_sin_ajuste = saldo_f - A + B + C_base - D
-    ajuste = saldo_extracto - calc_sin_ajuste
-    C_total = C_base + ajuste
-    calc_final = saldo_f - A + B + C_total - D
+    # Cálculo real sin ajustes artificiales
+    calc_final = saldo_f - A + B + C_base - D
+    diferencia_real = round(saldo_extracto - calc_final, 2)
 
     return {
         'matched': matched, 'unmatched_f': unmatched_f,
         'ub_ing': ub_ing, 'ub_egr': ub_egr,
         'b_imp': b_imp, 'b_egr_other': b_egr_other,
         'saldo_f': saldo_f, 'saldo_extracto': saldo_extracto,
-        'A': A, 'B': B, 'C_total': C_total, 'D': D,
-        'ajuste_residual': ajuste,
+        'A': A, 'B': B, 'C_total': C_base, 'D': D,
+        'ajuste_residual': 0.0,
         'calc_final': calc_final,
-        'diferencia': round(saldo_extracto - calc_final, 2)
+        'diferencia': diferencia_real
     }
 
 # ─── EXCEL BUILDER ─────────────────────────────────────────────────────────────
@@ -531,8 +577,9 @@ def build_excel(flexxus, bank, qr, trx, r):
     c=ws.cell(r_num+1,2,r['saldo_extracto']); c.number_format=money_fmt
     ws.cell(r_num+2,1,'Saldo S/FLEXXUS al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=norm
     c=ws.cell(r_num+2,2,r['saldo_f']); c.number_format=money_fmt
-    ws.cell(r_num+3,1,'DIFERENCIA INICIAL (ambos parten del cierre anterior)').font=norm
-    c=ws.cell(r_num+3,2,0.0); c.number_format=money_fmt
+    diff_ini = round(r['saldo_extracto'] - r['saldo_f'], 2)
+    ws.cell(r_num+3,1,'DIFERENCIA INICIAL (extracto banco vs libro Flexxus)').font=norm
+    c=ws.cell(r_num+3,2,diff_ini); c.number_format=money_fmt
 
     r_num=10
     items=[
@@ -552,8 +599,12 @@ def build_excel(flexxus, bank, qr, trx, r):
     c=ws.cell(r_num+1,2,r['calc_final']); c.number_format=money_fmt; c.font=bold_f
     ws.cell(r_num+2,1,'SALDO SEGÚN EXTRACTO BANCO al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=bold_f
     c=ws.cell(r_num+2,2,r['saldo_extracto']); c.number_format=money_fmt; c.font=bold_f
-    ws.cell(r_num+3,1,'DIFERENCIA FINAL (ideal = 0)').font=Font(bold=True,size=11,name='Calibri',color='375623')
-    c=ws.cell(r_num+3,2,0.0); c.number_format=money_fmt; c.font=Font(bold=True,size=11,name='Calibri',color='375623'); c.fill=grn_fill
+    diff_val = r['diferencia']
+    diff_color = '375623' if abs(diff_val) < 1.0 else 'C00000'  # verde si < $1, rojo si no
+    diff_fill = grn_fill if abs(diff_val) < 1.0 else PatternFill('solid', fgColor='FCE4EC')
+    ws.cell(r_num+3,1,'DIFERENCIA FINAL (debe ser 0)').font=Font(bold=True,size=11,name='Calibri',color=diff_color)
+    c=ws.cell(r_num+3,2,diff_val); c.number_format=money_fmt
+    c.font=Font(bold=True,size=11,name='Calibri',color=diff_color); c.fill=diff_fill
 
     # Filas extra: saldo luego de pasar conciliaciones
     saldo_flexxus_post = r['saldo_f'] - r['A']
@@ -581,16 +632,28 @@ def build_excel(flexxus, bank, qr, trx, r):
 
     ws.cell(rn,1,'Más: INGRESOS en el Banco pero NO registrados en FLEXXUS').font=bold_f
     c=ws.cell(rn,5,r['C_total']); c.number_format=money_fmt; rn+=1
-    # Detalle banco ing no Flexxus
-    for _,br in r['ub_ing'].iterrows():
-        cat=br['Categoria']
-        if cat=='QR': det='QR / CR DEBIN SPOT'; obs='QR acreditado en banco sin pendiente exacto Flexxus'
-        elif cat=='TRANSFERENCIA_ENTRANTE': det='Transferencia entrante / PAV'; obs='Ingreso bancario sin pendiente exacto en Flexxus'
-        else: det='Ajuste residual extracto vs suma de movimientos'; obs='Diferencia técnica de saldo'
-        dw(ws,rn,['Banco ingreso no Flexxus',br['Fecha'],det,1,br['ImporteNum'],obs],mc=[5]); rn+=1
-    # Ajuste residual
-    if abs(r['ajuste_residual'])>0.01:
-        dw(ws,rn,['Banco ingreso no Flexxus','','Ajuste residual extracto vs suma de movimientos',1,r['ajuste_residual'],'Diferencia técnica de saldo'],mc=[5]); rn+=1
+    # Detalle banco ing no Flexxus - AGRUPADO por categoría (no línea por línea)
+    LABEL_MAP = {
+        'QR': 'QR / CR DEBIN SPOT (cobros sin PAV pendiente en Flexxus)',
+        'LIQUIDACION_TARJETA': 'Liquidaciones tarjeta en banco sin PAV en Flexxus',
+        'TRANSFERENCIA_ENTRANTE': 'Transferencia entrante sin match en Flexxus',
+        'OTRO': 'Otros ingresos bancarios sin match',
+    }
+    OBS_MAP = {
+        'QR': 'QR del período acreditados en banco; se cargarán en Flexxus la semana siguiente',
+        'LIQUIDACION_TARJETA': 'Liquidaciones de tarjeta del período no cargadas aún en Flexxus',
+        'TRANSFERENCIA_ENTRANTE': 'Verificar si corresponde registrar como PAV o regularización',
+        'OTRO': 'Revisar origen',
+    }
+    # Agrupar
+    ub_ing_grupos = r['ub_ing'].copy()
+    ub_ing_grupos['CatLabel'] = ub_ing_grupos['Categoria'].map(LABEL_MAP).fillna('Ingreso bancario sin match')
+    for cat_label, grp in ub_ing_grupos.groupby('CatLabel'):
+        cant = len(grp); imp = grp['ImporteNum'].sum()
+        cat_key = grp['Categoria'].iloc[0]
+        obs = OBS_MAP.get(cat_key, 'Revisar detalle en hoja Banco ingresos no Flexxus')
+        dw(ws,rn,['Banco ingreso no Flexxus','',cat_label,cant,imp,obs],mc=[5]); rn+=1
+    # Sin ajuste residual artificial - si hay diferencia real aparece en DIFERENCIA FINAL
 
     ws.cell(rn,1,'Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS').font=bold_f
     c=ws.cell(rn,5,r['D']); c.number_format=money_fmt; rn+=1
@@ -657,14 +720,14 @@ def build_excel(flexxus, bank, qr, trx, r):
             qr_match = None; best_diff_qr = float('inf')
             for k, v in qr_list:
                 diff = abs(k - monto)
-                if diff < best_diff_qr and diff <= monto * 0.02:
+                if diff < best_diff_qr and diff <= max(monto * 0.02, 1.0):
                     best_diff_qr = diff; qr_match = v
 
             # Buscar mejor candidato TRX (tolerancia 2%)
             trx_match = None; best_diff_trx = float('inf')
             for k, v in trx_by_monto.items():
                 diff = abs(k - monto)
-                if diff < best_diff_trx and diff <= monto * 0.02:
+                if diff < best_diff_trx and diff <= max(monto * 0.02, 1.0):
                     best_diff_trx = diff; trx_match = v
 
             # Usar el match con menor diferencia
@@ -729,11 +792,15 @@ def build_excel(flexxus, bank, qr, trx, r):
             diag='Ingreso bancario sin pendiente exacto en Flexxus'
             accion='Verificar si corresponde registrar como PAV o regularización'
         else:
-            # Si el comprobante es un código de comercio, probablemente es QR con concepto diferente
-            if local:
-                origen='QR / pago electrónico'; cat_label='QR (concepto alternativo)'
-                diag='Ingreso bancario con código de comercio conocido'
-                accion='Verificar si es QR de período anterior o movimiento sin registrar en Flexxus'
+            if cat == 'LIQUIDACION_TARJETA':
+                origen='Liquidación tarjeta'; cat_label='Liquidación tarjeta (sin PAV en Flexxus)'
+                local=LOCAL_MAP.get(str(br['Comprobante']),'')
+                diag='Liquidación de tarjeta del período no cargada aún en Flexxus'
+                accion='Se cargará como PAV en próxima conciliación'
+            elif local:
+                origen='Pago electrónico / QR'; cat_label='Pago electrónico (comprobante conocido)'
+                diag='Ingreso con código de comercio conocido, concepto diferente a CR DEBIN SPOT'
+                accion='Verificar si es QR, tarjeta u otro cobro electrónico'
             else:
                 origen='Ingreso bancario'; cat_label=cat if cat != 'OTRO' else 'Ingreso bancario'
                 diag='Ingreso bancario sin categoría definida'
@@ -950,6 +1017,8 @@ def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav
     fecha_proceso = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     # Resumen de la semana
+    calc = saldo_flexxus - A + B + C - D
+    diferencia_real = round(saldo_banco - calc, 2)
     semana = {
         "id": semana_id,
         "fecha_proceso": fecha_proceso,
@@ -963,7 +1032,7 @@ def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav
         "C2_egresos_no_banco": round(B, 2),
         "C3_banco_no_flexxus": round(C, 2),
         "C4_egresos_banco": round(D, 2),
-        "diferencia_final": 0.0
+        "diferencia_final": diferencia_real
     }
     historico["semanas"].append(semana)
 
@@ -1206,6 +1275,18 @@ with tab_conc:
         """, unsafe_allow_html=True)
         f_qr = st.file_uploader("QR", type=['xls','xlsx'], key='qr', label_visibility='collapsed')
 
+        st.markdown("---")
+        st.markdown("### 📎 Conciliación anterior *(opcional)*")
+        st.caption("Si la subís, el sistema verifica el punto de arranque y detecta qué pendientes de la semana pasada se regularizaron.")
+        st.markdown("""
+        <div class="upload-card" style="border-color: #9ca3af;">
+            <div class="upload-label">Opcional · Trazabilidad</div>
+            <div class="upload-title">Conciliación Semanal anterior (.xlsx)</div>
+            <div class="upload-hint">El Excel de la semana anterior generado por esta app</div>
+        </div>
+        """, unsafe_allow_html=True)
+        f_prev = st.file_uploader("Conciliación anterior", type=['xlsx'], key='prev_conc', label_visibility='collapsed')
+
     with col2:
         st.markdown("### ⚙️ Proceso y resultados")
 
@@ -1233,6 +1314,91 @@ with tab_conc:
 
                     flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df, qr_df, trx_df)
                     res = compute_results(flexxus_df, banco_df)
+
+                    # ── Trazabilidad con conciliación anterior ──
+                    prev_data = None
+                    if f_prev is not None:
+                        prev_data = parse_prev_conciliacion(f_prev)
+                        if 'error' in prev_data:
+                            st.warning(f"⚠️ No se pudo leer la conciliación anterior: {prev_data['error']}")
+                            prev_data = None
+                        else:
+                            st.markdown("---")
+                            st.markdown("### 🔗 Trazabilidad con semana anterior")
+
+                            # Verificar punto de arranque
+                            saldo_ant = prev_data.get('saldo_extracto_anterior', 0)
+                            saldo_ini_flexxus = res['saldo_f']
+                            diff_arranque = round(saldo_ini_flexxus - saldo_ant, 2)
+
+                            col_t1, col_t2, col_t3 = st.columns(3)
+                            with col_t1:
+                                st.metric("Saldo banco cierre semana anterior", f"${saldo_ant:,.2f}")
+                            with col_t2:
+                                st.metric("Saldo Flexxus esta semana", f"${saldo_ini_flexxus:,.2f}")
+                            with col_t3:
+                                color = "normal" if abs(diff_arranque) < 1000 else "inverse"
+                                st.metric("Diferencia de arranque", f"${diff_arranque:,.2f}",
+                                         delta=None)
+
+                            if abs(diff_arranque) > 1000:
+                                st.error(f"❌ El saldo de arranque no coincide con el cierre anterior (diferencia ${diff_arranque:,.2f}). Verificá si hay asientos manuales intermedios.")
+                            elif abs(diff_arranque) > 0:
+                                st.warning(f"⚠️ Diferencia de arranque de ${diff_arranque:,.2f} — puede ser por asientos de impuestos o ajustes entre períodos.")
+                            else:
+                                st.success("✅ Punto de arranque correcto — coincide con el cierre de la semana anterior.")
+
+                            # Verificar regularizaciones
+                            pendientes_ant = prev_data.get('pendientes_semana_anterior', [])
+                            numeros_pendientes_ant = {p['numero'] for p in pendientes_ant}
+                            numeros_matched_ahora = set(res['matched']['Numero'].astype(str).tolist())
+                            numeros_aun_pendientes = set(res['unmatched_f']['Numero'].astype(str).tolist())
+
+                            regularizados = [p for p in pendientes_ant
+                                           if p['numero'] in numeros_matched_ahora]
+                            siguen_pendientes = [p for p in pendientes_ant
+                                               if p['numero'] in numeros_aun_pendientes]
+                            desaparecieron = [p for p in pendientes_ant
+                                            if p['numero'] not in numeros_matched_ahora
+                                            and p['numero'] not in numeros_aun_pendientes]
+
+                            if pendientes_ant:
+                                st.markdown(f"**Pendientes semana anterior: {len(pendientes_ant)}**")
+                                col_r1, col_r2, col_r3 = st.columns(3)
+                                with col_r1:
+                                    st.metric("✅ Regularizados esta semana",
+                                             len(regularizados),
+                                             f"${sum(p['monto'] for p in regularizados):,.0f}")
+                                with col_r2:
+                                    st.metric("⏳ Siguen pendientes",
+                                             len(siguen_pendientes),
+                                             f"${sum(p['monto'] for p in siguen_pendientes):,.0f}")
+                                with col_r3:
+                                    st.metric("❓ No encontrados",
+                                             len(desaparecieron),
+                                             f"${sum(p['monto'] for p in desaparecieron):,.0f}")
+
+                                if regularizados:
+                                    with st.expander(f"✅ Ver {len(regularizados)} regularizados"):
+                                        df_reg = pd.DataFrame(regularizados)
+                                        df_reg['monto'] = df_reg['monto'].apply(lambda x: f"${x:,.2f}")
+                                        st.dataframe(df_reg[['numero','movimiento','fecha','monto']],
+                                                    hide_index=True, use_container_width=True)
+
+                                if siguen_pendientes:
+                                    with st.expander(f"⏳ Ver {len(siguen_pendientes)} que siguen pendientes"):
+                                        df_sp = pd.DataFrame(siguen_pendientes)
+                                        df_sp['monto'] = df_sp['monto'].apply(lambda x: f"${x:,.2f}")
+                                        st.dataframe(df_sp[['numero','movimiento','fecha','monto']],
+                                                    hide_index=True, use_container_width=True)
+
+                                if desaparecieron:
+                                    with st.expander(f"❓ Ver {len(desaparecieron)} no encontrados en ningún lado"):
+                                        st.caption("Estos movimientos estaban pendientes la semana pasada pero no aparecen ni como matcheados ni como pendientes ahora. Verificar si se eliminaron de Flexxus.")
+                                        df_des = pd.DataFrame(desaparecieron)
+                                        df_des['monto'] = df_des['monto'].apply(lambda x: f"${x:,.2f}")
+                                        st.dataframe(df_des[['numero','movimiento','fecha','monto']],
+                                                    hide_index=True, use_container_width=True)
 
                     matched_pav  = res['matched'][res['matched']['Tipo']=='PAV']
                     matched_mbex = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
@@ -1310,11 +1476,16 @@ with tab_conc:
                             st.success(f"✅ {len(extra_rows)} movimientos agregados con el tipo mapeado.")
 
                 # ── Métricas ──
+                    diff_val = res['diferencia']
+                    if abs(diff_val) < 1.0:
+                        st.markdown(f"""
+                        <div class="diff-zero">
+                            <span style="font-size:1.6rem">✅</span>
+                            <span>DIFERENCIA FINAL: ${diff_val:,.2f} — Conciliación cerrada</span>
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        st.error(f"⚠️ DIFERENCIA FINAL: ${diff_val:,.2f} — La conciliación NO cierra. Revisá los movimientos sin match.")
                     st.markdown(f"""
-                    <div class="diff-zero">
-                        <span style="font-size:1.6rem">✅</span>
-                        <span>DIFERENCIA FINAL: $0,00 — Conciliación cerrada</span>
-                    </div>
                     <div class="metric-row">
                         <div class="metric">
                             <div class="metric-label">PAV matcheados</div>
