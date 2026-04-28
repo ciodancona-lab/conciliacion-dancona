@@ -545,16 +545,61 @@ def build_excel(flexxus, bank, qr, trx, r):
     aw(ws_rb)
 
     # ── HOJA 3: FLEXXUS NO BANCO ──
+    # Construir lookups para enriquecer entradas sin match
+    qr_by_neto = {}
+    for _, qr_r in qr.iterrows():
+        key = round(qr_r['NetoQR'], 2)
+        if key not in qr_by_neto:
+            qr_by_neto[key] = qr_r
+
+    trx_by_monto = {}
+    for _, tr in trx.iterrows():
+        key = round(tr['MontoNeto'], 2)
+        if key not in trx_by_monto:
+            trx_by_monto[key] = tr
+
     ws3=wb.create_sheet('Flexxus no Banco')
     ws3.cell(1,1,'Detalle de movimientos registrados en Flexxus que no están acreditados en banco').font=sub_f
-    hw(ws3,2,['Fecha Flexxus','Tipo','Número','Movimiento','Monto','Local','Cupón QR','Número de Liquidación de Tarjeta','Monto','Diferencia'])
+    hw(ws3,2,['Fecha Flexxus','Tipo','Número','Movimiento','Monto','Local','Cupón QR','Número de Liquidación de Tarjeta','Monto comparado','Diferencia'])
     rn=3
     for _,fr in r['unmatched_f'].iterrows():
-        local=LOCAL_MAP.get(str(fr.get('Comprobante','')),fr.get('Local',''))
-        cupon='' if fr['EsPedidosYa'] else fr.get('CuponQR','')
-        num_liq='' if fr['EsPedidosYa'] else fr.get('NumLiquidacion','')
+        monto = fr['MontoFlexxus']
+        local = ''; cupon = ''; num_liq = ''; monto_comp = ''; diferencia = ''
+
+        if fr['EsPedidosYa']:
+            local = LOCAL_MAP.get('', '')
+        else:
+            # Buscar en QR PCT (neto = monto Flexxus con tolerancia 1%)
+            key_qr = round(monto, 2)
+            qr_match = qr_by_neto.get(key_qr)
+            # Tolerancia ±1 peso
+            if qr_match is None:
+                for k, v in qr_by_neto.items():
+                    if abs(k - monto) <= 1.0:
+                        qr_match = v; break
+            if qr_match is not None:
+                local = LOCAL_MAP.get(str(qr_match['CodComercio']), str(qr_match['CodComercio']))
+                cupon = str(qr_match['IdQR'])
+                monto_comp = round(qr_match['NetoQR'], 2)
+                diferencia = round(monto - monto_comp, 2)
+            else:
+                # Buscar en TRX Merchant
+                key_trx = round(monto, 2)
+                trx_match = trx_by_monto.get(key_trx)
+                if trx_match is None:
+                    for k, v in trx_by_monto.items():
+                        if abs(k - monto) <= 1.0:
+                            trx_match = v; break
+                if trx_match is not None:
+                    local = LOCAL_MAP.get(str(trx_match['COMERCIO']), str(trx_match['COMERCIO']))
+                    num_liq = str(trx_match['NUMERO LIQUIDACION'])
+                    monto_comp = round(trx_match['MontoNeto'], 2)
+                    diferencia = round(monto - monto_comp, 2)
+
         dw(ws3,rn,[fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],fr['Movimiento'],
-                   fr['MontoFlexxus'],local,cupon,num_liq,'',''],mc=[5,9,10]); rn+=1
+                   monto,local,cupon,num_liq,
+                   monto_comp if monto_comp != '' else '',
+                   diferencia if diferencia != '' else ''],mc=[5,9,10]); rn+=1
     frz(ws3); aw(ws3)
 
     # ── HOJA 4: BANCO INGRESOS NO FLEXXUS ──
