@@ -14,21 +14,6 @@
       "C3_banco_no_flexxus": 65270.86,
       "C4_egresos_banco": 2497923.31,
       "diferencia_final": 0.0
-    },
-    {
-      "id": "20260428_135928",
-      "fecha_proceso": "28/04/2026 13:59",
-      "periodo": "27/04/2026 al 27/04/2026",
-      "saldo_flexxus": 24996327.79,
-      "saldo_banco": 27584507.39,
-      "matcheados": 72,
-      "pav_total": 2884696.05,
-      "mbex_total": 12361420.0,
-      "C1_flexxus_no_banco": 3182980.73,
-      "C2_egresos_no_banco": 0.0,
-      "C3_banco_no_flexxus": 5955445.23,
-      "C4_egresos_banco": 184284.9,
-      "diferencia_final": 0.0
     }
   ],
   "movimientos": [],
