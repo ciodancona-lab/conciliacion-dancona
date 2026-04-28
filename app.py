@@ -424,8 +424,113 @@ def run_conciliacion(flexxus, bank, qr, trx):
     bank_ing_avail = list(bank[bank['EsIngreso']].index)
     bank_egr_avail = list(bank[bank['EsEgreso']].index)
 
+
+    def _remove_available(avail_list, idxs):
+        idxset = set(idxs)
+        avail_list[:] = [x for x in avail_list if x not in idxset]
+
+    def _es_pav_regularizacion_qr(idx):
+        """Detecta PAV de regularización/agrupación QR para procesarlo antes del match individual."""
+        mov = str(flexxus.loc[idx, 'Movimiento']).upper()
+        nro = str(flexxus.loc[idx, 'Numero']).upper()
+        texto = f"{mov} {nro}"
+        return (
+            ('QR' in texto or 'DEBIN' in texto)
+            and (
+                'REG' in texto or 'REGULAR' in texto or 'REGULARIZ' in texto
+                or 'PERIODO' in texto or 'PERÍODO' in texto or 'ANTERIOR' in texto
+                or 'AJUSTE' in texto or 'ACUMUL' in texto
+            )
+        )
+
+    def _match_qr_agrupados_previos():
+        """Matchea PAV de regularización/agrupación QR contra muchos CR DEBIN SPOT antes del match PAV individual.
+
+        Esto evita que QR viejos (por ejemplo CR DEBIN SPOT del 20/04) sean usados para PAV normales
+        de fechas posteriores, dejando sin conciliar la regularización grande.
+        """
+        for idx in flexxus.index:
+            if flexxus.loc[idx, 'Matched']:
+                continue
+            if flexxus.loc[idx, 'Tipo'] != 'PAV':
+                continue
+
+            monto = float(flexxus.loc[idx, 'MontoFlexxus'])
+            fecha = flexxus.loc[idx, 'FechaFlexxus']
+            fecha_f = flexxus.loc[idx, 'FechaFlexxus_dt']
+            es_explicit_reg = _es_pav_regularizacion_qr(idx)
+
+            # Caso principal: QR no matcheados del mismo día suman el PAV.
+            candidatos_dia = bank[
+                (~bank['Matched']) &
+                (bank['Categoria'] == 'QR') &
+                (bank['Fecha'] == fecha)
+            ].copy()
+
+            if len(candidatos_dia) >= 2:
+                total_dia = round(candidatos_dia['ImporteNum'].sum(), 2)
+                if abs(total_dia - monto) < 1.00:
+                    fecha_min = candidatos_dia['Fecha_dt'].min()
+                    fecha_max = candidatos_dia['Fecha_dt'].max()
+                    flexxus.loc[idx, 'Matched'] = True
+                    flexxus.loc[idx, 'BancoFecha'] = fecha_max.strftime('%d/%m/%Y')
+                    flexxus.loc[idx, 'BancoComprobante'] = f'{len(candidatos_dia)} QR'
+                    flexxus.loc[idx, 'BancoConcepto'] = f'Regularización QR agrupados {fecha}'
+                    flexxus.loc[idx, 'BancoImporte'] = total_dia
+                    flexxus.loc[idx, 'Diferencia'] = round(total_dia - monto, 2)
+                    flexxus.loc[idx, 'CategoriaMatch'] = 'REGULARIZACION_QR'
+                    flexxus.loc[idx, 'FechaAcreditacionUsada'] = flexxus.loc[idx, 'FechaFlexxus']
+                    flexxus.loc[idx, 'Diagnostico'] = f'OK - Regularización QR agrupada contra {len(candidatos_dia)} CR DEBIN SPOT'
+                    if fecha_min < fecha_f:
+                        flexxus.loc[idx, 'AjusteFecha'] = (
+                            f'Banco desde {fecha_min.strftime("%d/%m/%Y")} hasta '
+                            f'{fecha_max.strftime("%d/%m/%Y")}; se usa fecha Flexxus'
+                        )
+                    for bidx in candidatos_dia.index:
+                        bank.loc[bidx, 'Matched'] = True
+                        bank.loc[bidx, 'FlexxusNumero'] = flexxus.loc[idx, 'Numero']
+                    _remove_available(bank_ing_avail, candidatos_dia.index)
+                    continue
+
+            # Si el texto indica regularización QR, permitir buscar QR anteriores agrupados por fecha bancaria.
+            if es_explicit_reg:
+                candidatos_previos = bank[
+                    (~bank['Matched']) &
+                    (bank['Categoria'] == 'QR') &
+                    (bank['Fecha_dt'] <= fecha_f)
+                ].copy()
+                if len(candidatos_previos) >= 2:
+                    for fecha_banco, grp in candidatos_previos.groupby('Fecha'):
+                        total_grp = round(grp['ImporteNum'].sum(), 2)
+                        if abs(total_grp - monto) < 1.00:
+                            fecha_min = grp['Fecha_dt'].min()
+                            fecha_max = grp['Fecha_dt'].max()
+                            flexxus.loc[idx, 'Matched'] = True
+                            flexxus.loc[idx, 'BancoFecha'] = fecha_max.strftime('%d/%m/%Y')
+                            flexxus.loc[idx, 'BancoComprobante'] = f'{len(grp)} QR'
+                            flexxus.loc[idx, 'BancoConcepto'] = f'Regularización QR agrupados {fecha_banco}'
+                            flexxus.loc[idx, 'BancoImporte'] = total_grp
+                            flexxus.loc[idx, 'Diferencia'] = round(total_grp - monto, 2)
+                            flexxus.loc[idx, 'CategoriaMatch'] = 'REGULARIZACION_QR'
+                            flexxus.loc[idx, 'FechaAcreditacionUsada'] = flexxus.loc[idx, 'FechaFlexxus']
+                            flexxus.loc[idx, 'Diagnostico'] = f'OK - Regularización QR explícita contra {len(grp)} CR DEBIN SPOT'
+                            if fecha_min < fecha_f:
+                                flexxus.loc[idx, 'AjusteFecha'] = (
+                                    f'Banco desde {fecha_min.strftime("%d/%m/%Y")} hasta '
+                                    f'{fecha_max.strftime("%d/%m/%Y")}; se usa fecha Flexxus'
+                                )
+                            for bidx in grp.index:
+                                bank.loc[bidx, 'Matched'] = True
+                                bank.loc[bidx, 'FlexxusNumero'] = flexxus.loc[idx, 'Numero']
+                            _remove_available(bank_ing_avail, grp.index)
+                            break
+
+    # Prioridad 0: reservar y conciliar QR agrupados antes del match PAV individual.
+    _match_qr_agrupados_previos()
     def match_side(tipo, avail_list):
         for idx in flexxus.index:
+            if flexxus.loc[idx,'Matched']:
+                continue
             if flexxus.loc[idx,'Tipo'] != tipo: continue
             monto   = flexxus.loc[idx,'MontoFlexxus']
             fecha_f = flexxus.loc[idx,'FechaFlexxus_dt']
@@ -433,6 +538,11 @@ def run_conciliacion(flexxus, bank, qr, trx):
             for bidx in avail_list:
                 b_amt = bank.loc[bidx,'ImporteAbs']
                 if abs(b_amt - monto) < 1.00:
+                    # Un PAV normal no debe tomar CR DEBIN SPOT de fecha bancaria anterior.
+                    # Los QR viejos/período anterior se resuelven primero como agrupación.
+                    if tipo == 'PAV' and bank.loc[bidx,'Categoria'] == 'QR':
+                        if bank.loc[bidx,'Fecha_dt'] < fecha_f:
+                            continue
                     diff = abs(bank.loc[bidx,'Fecha_dt'] - fecha_f)
                     if diff < best_diff:
                         best_diff = diff; best = bidx
