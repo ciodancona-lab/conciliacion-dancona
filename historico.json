@@ -31,5 +31,8 @@
       "diferencia_final": 0.0
     }
   ],
-  "movimientos": []
+  "movimientos": [],
+  "tipo_mappings": {
+    "": "Ignorar (no incluir)"
+  }
 }
