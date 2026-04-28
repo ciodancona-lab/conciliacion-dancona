@@ -796,7 +796,7 @@ def github_get_file(filename):
 def github_save_file(filename, content_dict, sha=None):
     """Guarda/actualiza un archivo JSON en el repo de GitHub."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        return False
+        return False, "Token o repo no configurado en Secrets"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     encoded = base64.b64encode(json.dumps(content_dict, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
@@ -804,7 +804,9 @@ def github_save_file(filename, content_dict, sha=None):
     if sha:
         body["sha"] = sha
     r = requests.put(url, headers=headers, json=body)
-    return r.status_code in (200, 201)
+    if r.status_code in (200, 201):
+        return True, "OK"
+    return False, f"HTTP {r.status_code}: {r.json().get('message', r.text[:200])}"
 
 def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav_total, mbex_total, A, B, C, D, unmatched_f_detalle):
     """Guarda el resumen y detalle de movimientos de la semana en el historial."""
@@ -861,8 +863,8 @@ def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav
             mov["estado"] = "regularizado"
             mov["semana_regularizacion"] = semana_id
 
-    github_save_file(HISTORIAL_FILE, historico, sha)
-    return semana_id
+    ok, msg = github_save_file(HISTORIAL_FILE, historico, sha)
+    return semana_id if ok else None, msg
 
 def render_historial():
     """Renderiza la pestaña de historial."""
@@ -873,6 +875,21 @@ def render_historial():
         <p>Trazabilidad completa semana a semana · Detección automática de regularizaciones</p>
     </div>
     """, unsafe_allow_html=True)
+
+    # Test de conexión
+    with st.expander("🔌 Estado de conexión con GitHub"):
+        if not GITHUB_TOKEN or not GITHUB_REPO:
+            st.error("❌ GITHUB_TOKEN o GITHUB_REPO no están configurados en Secrets.")
+        else:
+            url_test = f"https://api.github.com/repos/{GITHUB_REPO}"
+            try:
+                r_test = requests.get(url_test, headers={"Authorization": f"token {GITHUB_TOKEN}"})
+                if r_test.status_code == 200:
+                    st.success(f"✅ Conectado al repo: {GITHUB_REPO}")
+                else:
+                    st.error(f"❌ Error {r_test.status_code}: {r_test.json().get('message','')}")
+            except Exception as e_conn:
+                st.error(f"❌ Error de conexión: {e_conn}")
 
     historico, _ = github_get_file(HISTORIAL_FILE)
 
@@ -1175,20 +1192,23 @@ with tab_conc:
                         for _, r2 in res['unmatched_f'].iterrows()
                     ]
                     with st.spinner("Guardando en historial..."):
-                        ok = guardar_conciliacion(
-                            periodo=periodo,
-                            saldo_flexxus=res['saldo_f'],
-                            saldo_banco=res['saldo_extracto'],
-                            matched_count=len(res['matched']),
-                            pav_total=float(pav_match['MontoFlexxus'].sum()),
-                            mbex_total=float(mbex_match['MontoFlexxus'].sum()),
-                            A=res['A'], B=res['B'], C=res['C_total'], D=res['D'],
-                            unmatched_f_detalle=unmatched_detalle
-                        )
-                        if ok:
-                            st.success("✅ Conciliación guardada en el historial.")
-                        else:
-                            st.warning("⚠️ No se pudo guardar en el historial.")
+                        try:
+                            semana_id, msg = guardar_conciliacion(
+                                periodo=periodo,
+                                saldo_flexxus=res['saldo_f'],
+                                saldo_banco=res['saldo_extracto'],
+                                matched_count=len(res['matched']),
+                                pav_total=float(pav_match['MontoFlexxus'].sum()),
+                                mbex_total=float(mbex_match['MontoFlexxus'].sum()),
+                                A=res['A'], B=res['B'], C=res['C_total'], D=res['D'],
+                                unmatched_f_detalle=unmatched_detalle
+                            )
+                            if semana_id:
+                                st.success("✅ Conciliación guardada en el historial.")
+                            else:
+                                st.warning(f"⚠️ No se pudo guardar en el historial: {msg}")
+                        except Exception as e_hist:
+                            st.warning(f"⚠️ Error al guardar historial: {str(e_hist)}")
 
                     st.caption("⚡ Los archivos se generan en memoria. El historial se guarda en GitHub.")
 
