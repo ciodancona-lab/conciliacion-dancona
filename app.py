@@ -570,7 +570,7 @@ def build_excel(flexxus, bank, qr, trx, r):
         cuenta=imp_summary_map.get(cat,'Otro débito bancario')
         trat=trat_map.get(cat,'Revisar según concepto')
         dw(ws5,rn,['Banco egreso no Flexxus',br['Fecha'],br['Comprobante'],br['Concepto'],
-                   cuenta,trat,br['ImporteNum'].abs(),br['SaldoNum'],'Registrar asiento / revisar según concepto'],mc=[7,8]); rn+=1
+                   cuenta,trat,abs(br['ImporteNum']),br['SaldoNum'],'Registrar asiento / revisar según concepto'],mc=[7,8]); rn+=1
     frz(ws5); aw(ws5)
 
     # ── HOJA 6: REGULARIZACIONES ──
