@@ -14,6 +14,21 @@
       "C3_banco_no_flexxus": 65270.86,
       "C4_egresos_banco": 2497923.31,
       "diferencia_final": 0.0
+    },
+    {
+      "id": "20260428_031726",
+      "fecha_proceso": "28/04/2026 03:17",
+      "periodo": "20/04/2026 al 24/04/2026",
+      "saldo_flexxus": 37824483.97,
+      "saldo_banco": 29620748.49,
+      "matcheados": 250,
+      "pav_total": 40677139.64,
+      "mbex_total": 50600000.0,
+      "C1_flexxus_no_banco": 5771083.03,
+      "C2_egresos_no_banco": 0.0,
+      "C3_banco_no_flexxus": 65270.86,
+      "C4_egresos_banco": 2497923.31,
+      "diferencia_final": 0.0
     }
   ],
   "movimientos": [
@@ -24,8 +39,8 @@
       "monto": 38886.97,
       "fecha_flexxus": "21/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -35,8 +50,8 @@
       "monto": 68461.47,
       "fecha_flexxus": "21/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -46,8 +61,8 @@
       "monto": 32086.61,
       "fecha_flexxus": "24/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -57,8 +72,8 @@
       "monto": 2835183.6,
       "fecha_flexxus": "24/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -68,8 +83,8 @@
       "monto": 113688.74,
       "fecha_flexxus": "24/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -79,8 +94,8 @@
       "monto": 149439.29,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -90,8 +105,8 @@
       "monto": 50605.35,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -101,8 +116,8 @@
       "monto": 109330.83,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -112,8 +127,8 @@
       "monto": 33670.88,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -123,8 +138,8 @@
       "monto": 45950.85,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -134,8 +149,8 @@
       "monto": 33175.72,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -145,8 +160,8 @@
       "monto": 52486.96,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -156,8 +171,8 @@
       "monto": 12279.97,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -167,8 +182,8 @@
       "monto": 13171.26,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -178,8 +193,8 @@
       "monto": 62687.26,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -189,8 +204,8 @@
       "monto": 75561.42,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -200,8 +215,8 @@
       "monto": 65955.31,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -211,8 +226,8 @@
       "monto": 57834.69,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -222,8 +237,8 @@
       "monto": 31541.69,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -233,8 +248,8 @@
       "monto": 63083.38,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -244,8 +259,8 @@
       "monto": 9804.17,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -255,8 +270,8 @@
       "monto": 9408.04,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -266,8 +281,8 @@
       "monto": 10497.39,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -277,8 +292,8 @@
       "monto": 121413.23,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -288,8 +303,8 @@
       "monto": 12577.06,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -299,8 +314,8 @@
       "monto": 106607.95,
       "fecha_flexxus": "25/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -310,8 +325,8 @@
       "monto": 78037.32,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -321,8 +336,8 @@
       "monto": 72887.55,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -332,8 +347,8 @@
       "monto": 84375.26,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -343,8 +358,8 @@
       "monto": 25550.26,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -354,8 +369,8 @@
       "monto": 4456.44,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -365,8 +380,8 @@
       "monto": 51298.58,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -376,8 +391,8 @@
       "monto": 94080.4,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -387,8 +402,8 @@
       "monto": 16637.38,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -398,8 +413,8 @@
       "monto": 13368.35,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -409,8 +424,8 @@
       "monto": 24559.94,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -420,8 +435,8 @@
       "monto": 54962.76,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -431,8 +446,8 @@
       "monto": 12379.0,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -442,8 +457,8 @@
       "monto": 42979.89,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -453,8 +468,8 @@
       "monto": 38820.54,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -464,8 +479,8 @@
       "monto": 28026.06,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -475,8 +490,8 @@
       "monto": 75759.48,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -486,8 +501,8 @@
       "monto": 49516.0,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -497,8 +512,8 @@
       "monto": 14656.74,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -508,8 +523,8 @@
       "monto": 43376.02,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -519,8 +534,8 @@
       "monto": 11685.78,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -530,8 +545,8 @@
       "monto": 34463.14,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -541,8 +556,8 @@
       "monto": 64568.86,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -552,8 +567,8 @@
       "monto": 7625.58,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -563,8 +578,8 @@
       "monto": 57636.62,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -574,8 +589,8 @@
       "monto": 60013.39,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -585,8 +600,8 @@
       "monto": 67044.66,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -596,8 +611,8 @@
       "monto": 8912.88,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -607,8 +622,8 @@
       "monto": 24262.84,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -618,8 +633,8 @@
       "monto": 60904.68,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -629,8 +644,8 @@
       "monto": 79720.76,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -640,8 +655,8 @@
       "monto": 69916.59,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -651,8 +666,8 @@
       "monto": 23767.68,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -662,8 +677,8 @@
       "monto": 38721.51,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -673,8 +688,8 @@
       "monto": 26837.67,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -684,8 +699,8 @@
       "monto": 69520.46,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     },
     {
@@ -695,8 +710,8 @@
       "monto": 24361.87,
       "fecha_flexxus": "26/04/2026",
       "primera_semana": "20260428_031539",
-      "ultima_semana_vista": "20260428_031539",
-      "semanas_pendiente": 1,
+      "ultima_semana_vista": "20260428_031726",
+      "semanas_pendiente": 2,
       "estado": "pendiente"
     }
   ]
