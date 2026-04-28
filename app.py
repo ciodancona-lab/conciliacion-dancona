@@ -319,12 +319,27 @@ def run_conciliacion(flexxus, bank, qr, trx):
     reg_idx = flexxus[flexxus['Numero']=='1600010644'].index
     if len(reg_idx) > 0 and not flexxus.loc[reg_idx[0],'Matched']:
         i = reg_idx[0]
+        reg_fecha = flexxus.loc[i,'FechaFlexxus']
+        reg_monto = flexxus.loc[i,'MontoFlexxus']
         flexxus.loc[i,'Matched']            = True
-        flexxus.loc[i,'FechaAcreditacionUsada'] = flexxus.loc[i,'FechaFlexxus']
-        flexxus.loc[i,'BancoFecha']         = flexxus.loc[i,'FechaFlexxus']
+        flexxus.loc[i,'FechaAcreditacionUsada'] = reg_fecha
+        flexxus.loc[i,'BancoFecha']         = reg_fecha
         flexxus.loc[i,'BancoConcepto']      = 'Regularización QR período anterior (acumulado)'
         flexxus.loc[i,'CategoriaMatch']     = 'REGULARIZACION_QR'
         flexxus.loc[i,'Diagnostico']        = 'Regularización período anterior'
+        # Consumir los QR del banco de la misma fecha que cubren este monto
+        bank_qr_reg = bank[
+            (~bank['Matched']) &
+            (bank['Categoria']=='QR') &
+            (bank['Fecha']==reg_fecha)
+        ]
+        running = 0.0
+        for bidx in bank_qr_reg.index:
+            bank.loc[bidx,'Matched'] = True
+            bank.loc[bidx,'FlexxusNumero'] = flexxus.loc[i,'Numero']
+            running += bank.loc[bidx,'ImporteNum']
+            if abs(running - reg_monto) < 1.0:
+                break
 
     return flexxus, bank
 
@@ -342,10 +357,8 @@ def compute_results(flexxus, bank):
     b_imp       = ub_egr[ub_egr['Categoria'].isin(IMP_CATS)]
     b_egr_other = ub_egr[~ub_egr['Categoria'].isin(IMP_CATS)]
 
-    saldo_flexxus = matched[matched['Tipo']=='PAV']['SaldoFlexxus'].dropna()
-    if len(saldo_flexxus) == 0:
-        saldo_flexxus = flexxus['SaldoFlexxus'].dropna()
-    saldo_f = saldo_flexxus.iloc[-1] if len(saldo_flexxus) > 0 else 0
+    # Usar siempre el ultimo saldo del libro Flexxus (no solo PAV matcheados)
+    saldo_f = flexxus['SaldoFlexxus'].dropna().iloc[-1] if flexxus['SaldoFlexxus'].dropna().shape[0] > 0 else 0
 
     saldo_extracto = bank.iloc[0]['SaldoNum']
 
@@ -685,6 +698,35 @@ def build_xls(r):
     wb.save(output)
     output.seek(0)
     return output
+
+
+# ─── AUTH ──────────────────────────────────────────────────────────────────────
+VALID_USER     = "dancona2016@gmail.com"
+VALID_PASSWORD = "Dancona2026*"
+
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.markdown("""
+    <div class="hero">
+        <div class="badge">🔐 ACCESO RESTRINGIDO</div>
+        <h1>Conciliación Bancaria</h1>
+        <p>Grupo D'Ancona · Ingresá tus credenciales para continuar</p>
+    </div>
+    """, unsafe_allow_html=True)
+    col_c, col_m, col_r = st.columns([1,2,1])
+    with col_m:
+        st.markdown("### Iniciar sesión")
+        usuario = st.text_input("Usuario (email)", placeholder="tu@email.com")
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Ingresar", use_container_width=True):
+            if usuario == VALID_USER and password == VALID_PASSWORD:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+    st.stop()
 
 # ─── UI ────────────────────────────────────────────────────────────────────────
 st.markdown("""
