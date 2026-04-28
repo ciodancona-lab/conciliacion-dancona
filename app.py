@@ -679,26 +679,72 @@ def build_excel(flexxus, bank, qr, trx, r):
                 monto_comp = round(trx_match['MontoNeto'], 2)
                 diferencia = round(monto - monto_comp, 2)
 
+        # Si no hay match, indicar explícitamente
+        if not fr['EsPedidosYa'] and local == '' and cupon == '' and num_liq == '':
+            local = '—'; cupon = 'No encontrado en QR ni TRX'
         dw(ws3,rn,[fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],fr['Movimiento'],
                    monto,local,cupon,num_liq,
-                   monto_comp if monto_comp != '' else '',
+                   monto_comp if monto_comp != '' else '—',
                    diferencia if diferencia != '' else ''],mc=[5,9,10]); rn+=1
     frz(ws3); aw(ws3)
 
     # ── HOJA 4: BANCO INGRESOS NO FLEXXUS ──
+    # Lookup QR inverso: buscar por importe bancario → cupón y local
+    qr_by_neto_bi = {}
+    for _, qr_r in qr.iterrows():
+        key = round(qr_r['NetoQR'], 2)
+        if key not in qr_by_neto_bi:
+            qr_by_neto_bi[key] = qr_r
+
     ws4=wb.create_sheet('Banco ingresos no Flexxus')
     ws4.cell(1,1,'Detalle de ingresos del banco no registrados en Flexxus - con diagnóstico de origen').font=sub_f
     hw(ws4,2,['Bloque','Fecha banco','Comprobante banco','Concepto banco','Categoría','Importe','Saldo banco','Origen detectado','Archivo donde aparece','Local','Cupón QR','Número de Liquidación de Tarjeta','Monto comparado','Diferencia','Diagnóstico','Acción sugerida'])
     rn=3
     for _,br in r['ub_ing'].iterrows():
         cat=br['Categoria']
+        imp = br['ImporteNum']
+        # Local desde comprobante (funciona para QR donde comprobante = código comercio)
         local=LOCAL_MAP.get(str(br['Comprobante']),'')
-        if cat=='QR': origen='QR PCT / CR DEBIN SPOT'; diag='QR acreditado en banco sin pendiente exacto Flexxus'; accion='Revisar si corresponde a QR/transferencia sin pendiente exacto'
-        elif cat=='TRANSFERENCIA_ENTRANTE': origen='Transferencia entrante'; diag='Ingreso bancario sin pendiente exacto en Flexxus'; accion='Revisar si corresponde registrar como PAV/cobro o regularización'
-        else: origen='Ajuste técnico'; diag='Diferencia técnica de saldo para cierre exacto'; accion='Solo para cierre de conciliación'
-        cat_label='QR / CR DEBIN SPOT' if cat=='QR' else ('Transferencia entrante / PAV' if cat=='TRANSFERENCIA_ENTRANTE' else 'Ajuste residual')
+        cupon_bi=''; num_liq_bi=''; monto_comp_bi=''; diferencia_bi=''
+
+        if cat=='QR':
+            origen='QR PCT / CR DEBIN SPOT'
+            diag='QR acreditado en banco sin pendiente exacto en Flexxus'
+            accion='Verificar si corresponde a período anterior o PAV sin registrar'
+            # Buscar en QR PCT por neto
+            key_qr = round(imp, 2)
+            qr_match_bi = qr_by_neto_bi.get(key_qr)
+            if qr_match_bi is None:
+                for k, v in qr_by_neto_bi.items():
+                    if abs(k - imp) <= imp * 0.005:
+                        qr_match_bi = v; break
+            if qr_match_bi is not None:
+                local = LOCAL_MAP.get(str(qr_match_bi['CodComercio']), str(qr_match_bi['CodComercio']))
+                cupon_bi = str(qr_match_bi.get('Cupon', qr_match_bi['IdQR'])).strip()
+                monto_comp_bi = round(qr_match_bi['NetoQR'], 2)
+                diferencia_bi = round(imp - monto_comp_bi, 2)
+            cat_label='QR / CR DEBIN SPOT'
+        elif cat=='TRANSFERENCIA_ENTRANTE':
+            origen='Transferencia entrante'; cat_label='Transferencia entrante / PAV'
+            diag='Ingreso bancario sin pendiente exacto en Flexxus'
+            accion='Verificar si corresponde registrar como PAV o regularización'
+        else:
+            # Si el comprobante es un código de comercio, probablemente es QR con concepto diferente
+            if local:
+                origen='QR / pago electrónico'; cat_label='QR (concepto alternativo)'
+                diag='Ingreso bancario con código de comercio conocido'
+                accion='Verificar si es QR de período anterior o movimiento sin registrar en Flexxus'
+            else:
+                origen='Ingreso bancario'; cat_label=cat if cat != 'OTRO' else 'Ingreso bancario'
+                diag='Ingreso bancario sin categoría definida'
+                accion='Revisar concepto y origen'
+
         dw(ws4,rn,['Banco ingreso no Flexxus',br['Fecha'],br['Comprobante'],br['Concepto'],
-                   cat_label,br['ImporteNum'],br['SaldoNum'],origen,'Banco',local,'','','','',diag,accion],mc=[6,7]); rn+=1
+                   cat_label,imp,br['SaldoNum'],origen,'Banco',local,
+                   cupon_bi,num_liq_bi,
+                   monto_comp_bi if monto_comp_bi != '' else '',
+                   diferencia_bi if diferencia_bi != '' else '',
+                   diag,accion],mc=[6,7]); rn+=1
     frz(ws4); aw(ws4)
 
     # ── HOJA 5: BANCO EGRESOS NO FLEXXUS ──
