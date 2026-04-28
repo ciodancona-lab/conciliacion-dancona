@@ -194,6 +194,14 @@ def parse_flexxus(file):
         if saldo > 0: last_saldo_all = saldo
         if tipo == 'MB-EXT':
             mbext_total += haber
+            # Guardar también como fila completa para incluir en importación
+            numero     = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ''
+            movimiento = str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else ''
+            rows.append({
+                'FechaFlexxus': fecha, 'Tipo': 'MB-EXT', 'Numero': numero,
+                'Movimiento': movimiento, 'MontoFlexxus': haber,
+                'SaldoFlexxus': saldo, 'EsPedidosYa': False
+            })
             continue
         if tipo not in ('PAV', 'MB-ENT-EX'):
             # Tipo desconocido — guardar para que el usuario decida
@@ -220,7 +228,7 @@ def parse_flexxus(file):
     df_out = pd.DataFrame(rows)
     if len(df_out) == 0:
         raise ValueError("No se encontraron filas PAV o MB-ENT-EX en el archivo Flexxus.")
-    df_out['FechaFlexxus_dt'] = pd.to_datetime(df_out['FechaFlexxus'], format='%d/%m/%Y')
+    df_out['FechaFlexxus_dt'] = pd.to_datetime(df_out['FechaFlexxus'], format='%d/%m/%Y', errors='coerce')
     df_out.attrs['mbext_total'] = mbext_total
     df_out.attrs['last_saldo_all'] = last_saldo_all
     df_out.attrs['unknown_types'] = unknown_types
@@ -342,6 +350,47 @@ def run_conciliacion(flexxus, bank, qr, trx):
 
     match_side('PAV',       bank_ing_avail)
     match_side('MB-ENT-EX', bank_egr_avail)
+
+    # Match MB-EXT (impuestos/extracciones) contra egresos bancarios
+    # Cada MB-EXT es un total semanal que puede corresponder a N entradas bancarias
+    # Estrategia: match por monto exacto en bank_egr_avail
+    for idx in flexxus.index:
+        if flexxus.loc[idx,'Tipo'] != 'MB-EXT': continue
+        monto   = flexxus.loc[idx,'MontoFlexxus']
+        fecha_f = flexxus.loc[idx,'FechaFlexxus_dt']
+        best = None; best_diff = pd.Timedelta(days=999)
+        for bidx in bank_egr_avail:
+            b_amt = bank.loc[bidx,'ImporteAbs']
+            if abs(b_amt - monto) < 0.02:
+                diff = abs(bank.loc[bidx,'Fecha_dt'] - fecha_f)
+                if diff < best_diff:
+                    best_diff = diff; best = bidx
+        if best is not None:
+            b = bank.loc[best]
+            flexxus.loc[idx,'Matched']            = True
+            flexxus.loc[idx,'BancoFecha']         = b['Fecha']
+            flexxus.loc[idx,'BancoComprobante']   = b['Comprobante']
+            flexxus.loc[idx,'BancoConcepto']      = b['Concepto']
+            flexxus.loc[idx,'BancoImporte']       = b['ImporteNum']
+            flexxus.loc[idx,'Diferencia']         = 0.0
+            flexxus.loc[idx,'CategoriaMatch']     = b['Categoria']
+            flexxus.loc[idx,'Diagnostico']        = 'OK - MB-EXT match exacto'
+            # Fecha: si banco < Flexxus usar fecha Flexxus
+            if bank.loc[best,'Fecha_dt'] < fecha_f:
+                flexxus.loc[idx,'FechaAcreditacionUsada'] = flexxus.loc[idx,'FechaFlexxus']
+                flexxus.loc[idx,'AjusteFecha'] = f'Banco {b["Fecha"]} < Flexxus {flexxus.loc[idx,"FechaFlexxus"]}; se usa fecha Flexxus'
+            else:
+                flexxus.loc[idx,'FechaAcreditacionUsada'] = b['Fecha']
+            bank.loc[best,'Matched'] = True
+            bank_egr_avail.remove(best)
+        else:
+            # No hay match exacto — marcar como matched con fecha Flexxus
+            # (ya fue conciliado manualmente, necesita entrar al import)
+            flexxus.loc[idx,'Matched']            = True
+            flexxus.loc[idx,'BancoFecha']         = flexxus.loc[idx,'FechaFlexxus']
+            flexxus.loc[idx,'BancoConcepto']      = 'Consolidado banco (sin match exacto individual)'
+            flexxus.loc[idx,'FechaAcreditacionUsada'] = flexxus.loc[idx,'FechaFlexxus']
+            flexxus.loc[idx,'Diagnostico']        = 'MB-EXT sin match exacto - usar fecha Flexxus'
 
     # Regularización 1600010644 si no matcheó
     reg_idx = flexxus[flexxus['Numero']=='1600010644'].index
@@ -763,7 +812,9 @@ def build_xls(r):
         if not fa or str(fa)=='nan': fa = fr['FechaFlexxus']
         try: fm=datetime.strptime(fr['FechaFlexxus'],'%d/%m/%Y'); ws.write(i,0,fm,date_s)
         except: ws.write(i,0,fr['FechaFlexxus'])
-        ws.write(i,1,fr['Tipo'])
+        # MB-EXT se importa como MB-ENT-EX (egreso) en Flexxus
+        tipo_import = 'MB-ENT-EX' if fr['Tipo'] == 'MB-EXT' else fr['Tipo']
+        ws.write(i,1,tipo_import)
         ws.write(i,2,abs(round(fr['MontoFlexxus'],2)),mon_s)
         try: fa_d=datetime.strptime(str(fa),'%d/%m/%Y'); ws.write(i,3,fa_d,date_s)
         except: ws.write(i,3,str(fa))
