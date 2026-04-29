@@ -12,6 +12,9 @@ import io
 import re
 import uuid
 import warnings
+import sys
+import traceback
+import platform
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -28,6 +31,8 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 # CONFIG
 # =============================================================================
+
+APP_VERSION = "V3.1-DIAGNOSTICO-RESET · 2026-04-29"
 
 st.set_page_config(
     page_title="Conciliación Bancaria Dancona · V3",
@@ -1209,23 +1214,82 @@ def render_header():
         """
         <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
           <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-          <div style="font-size:30px;font-weight:700">Conciliación bancaria continua V3</div>
-          <div style="font-size:15px;opacity:.85;margin-top:6px">Con pendientes anteriores, regularizaciones auditables y cierre sin ajustes genéricos y matching agregado MB-EXT.</div>
+          <div style="font-size:30px;font-weight:700">Conciliación bancaria continua V3.1</div>
+          <div style="font-size:15px;opacity:.85;margin-top:6px">Con reset manual, diagnóstico visible, pendientes anteriores, regularizaciones auditables y matching agregado MB-EXT.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
+
+def get_package_versions() -> dict:
+    """Diagnóstico liviano de entorno para Streamlit Cloud."""
+    versions = {
+        "APP_VERSION": APP_VERSION,
+        "python": sys.version.replace("\n", " "),
+        "platform": platform.platform(),
+    }
+    for name in ["streamlit", "pandas", "numpy", "openpyxl", "xlrd", "xlwt"]:
+        try:
+            mod = __import__(name)
+            versions[name] = getattr(mod, "__version__", "instalado_sin_version")
+        except Exception as e:
+            versions[name] = f"NO INSTALADO / ERROR: {e}"
+    return versions
+
+
+def uploaded_info(file_obj):
+    """Devuelve datos del archivo subido sin leer su contenido."""
+    if file_obj is None:
+        return {"cargado": False, "nombre": "", "size_bytes": 0}
+    return {
+        "cargado": True,
+        "nombre": getattr(file_obj, "name", ""),
+        "size_bytes": getattr(file_obj, "size", 0),
+        "type": getattr(file_obj, "type", ""),
+    }
+
+
+def render_diagnostics(files_map: dict):
+    """Muestra diagnóstico antes de procesar para saber qué versión está corriendo."""
+    with st.expander("🧪 Diagnóstico técnico / verificar versión cargada", expanded=False):
+        st.write("**Versión de la app en ejecución:**", APP_VERSION)
+        st.write("**Estado de sesión:**", {k: str(v) for k, v in st.session_state.items() if k in ["run_requested", "last_run_ok", "last_error"]})
+        st.write("**Archivos detectados:**")
+        st.dataframe(pd.DataFrame([{"slot": k, **uploaded_info(v)} for k, v in files_map.items()]), use_container_width=True, hide_index=True)
+        st.write("**Entorno:**")
+        st.json(get_package_versions())
+        st.caption("Si esta versión no dice V3.1-DIAGNOSTICO-RESET, Streamlit está ejecutando un app.py viejo o cacheado.")
+
+
+def reset_app_state():
+    """Borra flags internos para que no procese automáticamente en reruns."""
+    for key in ["run_requested", "last_run_ok", "last_error", "last_traceback"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
 def main():
     render_header()
 
     st.sidebar.header("Archivos")
-    f_flex = st.sidebar.file_uploader("1 · Conciliación Bancaria Flexxus actual", type=["xls", "xlsx"])
-    f_bank = st.sidebar.file_uploader("2 · Últimos movimientos Banco Nación actual", type=["xls", "xlsx"])
-    f_trx = st.sidebar.file_uploader("3 · TRX Merchant Center", type=["xlsx", "xls"])
-    f_qr = st.sidebar.file_uploader("4 · Transacciones QR", type=["xlsx", "xls"])
-    f_prev = st.sidebar.file_uploader("5 · Conciliación anterior del sistema (opcional solo en primera corrida)", type=["xlsx"])
+    st.sidebar.caption(f"Versión ejecutándose: {APP_VERSION}")
+
+    if st.sidebar.button("🔄 Resetear app / limpiar estado", use_container_width=True):
+        reset_app_state()
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+
+    f_flex = st.sidebar.file_uploader("1 · Conciliación Bancaria Flexxus actual", type=["xls", "xlsx"], key="u_flex")
+    f_bank = st.sidebar.file_uploader("2 · Últimos movimientos Banco Nación actual", type=["xls", "xlsx"], key="u_bank")
+    f_trx = st.sidebar.file_uploader("3 · TRX Merchant Center", type=["xlsx", "xls"], key="u_trx")
+    f_qr = st.sidebar.file_uploader("4 · Transacciones QR", type=["xlsx", "xls"], key="u_qr")
+    f_prev = st.sidebar.file_uploader("5 · Conciliación anterior del sistema (opcional solo en primera corrida)", type=["xlsx"], key="u_prev")
+
+    files_map = {"Flexxus": f_flex, "Banco": f_bank, "TRX": f_trx, "QR": f_qr, "Conciliación anterior": f_prev}
+    render_diagnostics(files_map)
 
     st.info(
         "Si no subís conciliación anterior, la corrida se considera **conciliación de apertura**. "
@@ -1233,14 +1297,26 @@ def main():
     )
 
     if not f_flex or not f_bank:
+        reset_app_state()
         st.warning("Subí al menos Flexxus actual y Banco Nación actual para procesar.")
         return
 
     if "run_requested" not in st.session_state:
         st.session_state.run_requested = False
 
-    if st.button("Comenzar", type="primary", use_container_width=True):
-        st.session_state.run_requested = True
+    col_run, col_reset = st.columns([2, 1])
+    with col_run:
+        if st.button("▶️ Comenzar conciliación", type="primary", use_container_width=True):
+            st.session_state.run_requested = True
+            st.session_state.last_error = ""
+            st.session_state.last_traceback = ""
+    with col_reset:
+        if st.button("Limpiar resultado", use_container_width=True):
+            reset_app_state()
+            st.rerun()
+
+    if not st.session_state.run_requested:
+        st.stop()
 
     if st.session_state.run_requested:
         try:
@@ -1258,6 +1334,7 @@ def main():
                 flex, bank = match_current(flex, bank, qr, trx)
                 res = compute_results(flex, bank, prev_status, regs, mode, prev_summary)
 
+            st.session_state.last_run_ok = True
             st.success("Conciliación procesada.")
 
             c1, c2, c3, c4 = st.columns(4)
@@ -1337,8 +1414,30 @@ def main():
             )
 
         except Exception as e:
+            st.session_state.last_run_ok = False
+            st.session_state.last_error = str(e)
+            st.session_state.last_traceback = traceback.format_exc()
             st.exception(e)
             st.error("No se pudo procesar. Revisá que los archivos correspondan al formato esperado.")
+
+            diag_txt = []
+            diag_txt.append(f"APP_VERSION: {APP_VERSION}")
+            diag_txt.append("\nARCHIVOS:")
+            for k, v in files_map.items():
+                diag_txt.append(f"- {k}: {uploaded_info(v)}")
+            diag_txt.append("\nENTORNO:")
+            diag_txt.append(str(get_package_versions()))
+            diag_txt.append("\nERROR:")
+            diag_txt.append(str(e))
+            diag_txt.append("\nTRACEBACK:")
+            diag_txt.append(traceback.format_exc())
+            st.download_button(
+                "Descargar diagnóstico del error",
+                data="\n".join(diag_txt).encode("utf-8"),
+                file_name="diagnostico_error_conciliacion.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
 
 
 if __name__ == "__main__":
