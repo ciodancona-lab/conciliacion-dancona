@@ -1,22 +1,6 @@
 {
   "semanas": [
     {
-      "id": "20260429_035153",
-      "fecha_proceso": "29/04/2026 03:51",
-      "periodo": "27/04/2026 al 27/04/2026",
-      "saldo_flexxus": 24996327.79,
-      "saldo_banco": 27584507.39,
-      "matcheados": 67,
-      "pav_total": 5719879.65,
-      "mbex_total": 12361420.0,
-      "mbext_total": 0.0,
-      "C1_flexxus_no_banco": 347797.13,
-      "C2_egresos_no_banco": 763329.93,
-      "C3_banco_no_flexxus": 4789587.75,
-      "C4_egresos_banco": 184284.9,
-      "diferencia_final": -2432656.05
-    },
-    {
       "id": "20260429_035205",
       "fecha_proceso": "29/04/2026 03:52",
       "periodo": "27/04/2026 al 27/04/2026",
@@ -65,80 +49,7 @@
       "diferencia_final": 0.0
     }
   ],
-  "movimientos": [
-    {
-      "numero": "0000-00026811",
-      "tipo": "MB-EXT",
-      "movimiento": "EXTRACCION - Retención Ingresos Brutos Mendoza",
-      "monto": 407424.17,
-      "fecha_flexxus": "27/04/2026",
-      "primera_semana": "20260429_035153",
-      "ultima_semana_vista": "20260429_035205",
-      "semanas_pendiente": 2,
-      "estado": "regularizado",
-      "semana_regularizacion": "20260429_113829"
-    },
-    {
-      "numero": "0000-00026812",
-      "tipo": "MB-EXT",
-      "movimiento": "EXTRACCION - Anticipo Impuesto a las Ganancias - Ley 25.413 déb",
-      "monto": 106472.89,
-      "fecha_flexxus": "27/04/2026",
-      "primera_semana": "20260429_035153",
-      "ultima_semana_vista": "20260429_035205",
-      "semanas_pendiente": 2,
-      "estado": "regularizado",
-      "semana_regularizacion": "20260429_113829"
-    },
-    {
-      "numero": "0000-00026813",
-      "tipo": "MB-EXT",
-      "movimiento": "EXTRACCION - Anticipo Impuesto a las Ganancias - Ley 25.413 cré",
-      "monto": 244454.46,
-      "fecha_flexxus": "27/04/2026",
-      "primera_semana": "20260429_035153",
-      "ultima_semana_vista": "20260429_035205",
-      "semanas_pendiente": 2,
-      "estado": "regularizado",
-      "semana_regularizacion": "20260429_113829"
-    },
-    {
-      "numero": "0000-00026814",
-      "tipo": "MB-EXT",
-      "movimiento": "EXTRACCION - Gastos bancarios - comisión transferencia electrón",
-      "monto": 2868.0,
-      "fecha_flexxus": "27/04/2026",
-      "primera_semana": "20260429_035153",
-      "ultima_semana_vista": "20260429_035205",
-      "semanas_pendiente": 2,
-      "estado": "regularizado",
-      "semana_regularizacion": "20260429_113829"
-    },
-    {
-      "numero": "0000-00026815",
-      "tipo": "MB-EXT",
-      "movimiento": "EXTRACCION - IVA sobre gastos/comisiones bancarias",
-      "monto": 602.28,
-      "fecha_flexxus": "27/04/2026",
-      "primera_semana": "20260429_035153",
-      "ultima_semana_vista": "20260429_035205",
-      "semanas_pendiente": 2,
-      "estado": "regularizado",
-      "semana_regularizacion": "20260429_113829"
-    },
-    {
-      "numero": "0000-00026816",
-      "tipo": "MB-EXT",
-      "movimiento": "EXTRACCION - Débito liquidación Mastercard 24H",
-      "monto": 1508.13,
-      "fecha_flexxus": "27/04/2026",
-      "primera_semana": "20260429_035153",
-      "ultima_semana_vista": "20260429_035205",
-      "semanas_pendiente": 2,
-      "estado": "regularizado",
-      "semana_regularizacion": "20260429_113829"
-    }
-  ],
+  "movimientos": [],
   "tipo_mappings": {
     "": "Ignorar (no incluir)"
   }
