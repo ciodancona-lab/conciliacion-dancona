@@ -349,6 +349,25 @@ def parse_prev_conciliacion(file):
             prev['pendientes_semana_anterior'] = pendientes
         except:
             prev['pendientes_semana_anterior'] = []
+        # Leer Resumen banco anterior: totales de egresos/impuestos/gastos pendientes de la conciliación previa
+        try:
+            rb = pd.read_excel(file, sheet_name='Resumen banco', dtype=str, header=1)
+            resumen_banco = []
+            for _, row in rb.iterrows():
+                concepto = str(row.get('Concepto banco', '')).strip()
+                cuenta = str(row.get('Cuenta / apertura sugerida', '')).strip()
+                tratamiento = str(row.get('Tratamiento', '')).strip()
+                importe = parse_ar_num(row.get('Importe', 0))
+                if concepto and concepto != 'nan' and importe > 0:
+                    resumen_banco.append({
+                        'concepto': concepto,
+                        'cuenta': cuenta,
+                        'tratamiento': tratamiento,
+                        'importe': round(importe, 2),
+                    })
+            prev['resumen_banco_anterior'] = resumen_banco
+        except Exception:
+            prev['resumen_banco_anterior'] = []
 
         return prev
     except Exception as e:
@@ -400,7 +419,7 @@ def parse_trx(file):
     return trx
 
 # ─── MATCHING ENGINE ───────────────────────────────────────────────────────────
-def run_conciliacion(flexxus, bank, qr, trx):
+def run_conciliacion(flexxus, bank, qr, trx, prev_data=None):
     # Init columns
     for col in ['Matched','BancoFecha','BancoComprobante','BancoConcepto','BancoImporte',
                 'Diferencia','CategoriaMatch','Local','CuponQR','NumLiquidacion',
@@ -685,18 +704,59 @@ def run_conciliacion(flexxus, bank, qr, trx):
             _remove_available(bank_egr_avail, [best])
 
         else:
-            # Si no hay respaldo, queda pendiente. No se fuerza el match.
-            flexxus.loc[idx, 'Matched'] = False
-            flexxus.loc[idx, 'BancoFecha'] = ''
-            flexxus.loc[idx, 'BancoComprobante'] = ''
-            flexxus.loc[idx, 'BancoConcepto'] = 'MB-EXT sin respaldo bancario suficiente'
-            flexxus.loc[idx, 'BancoImporte'] = 0.0
-            flexxus.loc[idx, 'Diferencia'] = monto
-            flexxus.loc[idx, 'CategoriaMatch'] = 'MB-EXT_SIN_MATCH'
-            flexxus.loc[idx, 'FechaAcreditacionUsada'] = ''
-            flexxus.loc[idx, 'Diagnostico'] = (
-                'REVISAR - MB-EXT no matchea contra suma agrupada ni línea individual'
-            )
+            # Si no hay respaldo en banco actual, verificar contra Resumen banco de la conciliación anterior.
+            # Esto cubre el caso real: impuestos/retenciones/gastos bancarios del período anterior
+            # cargados luego en Flexxus como MB-EXT por total.
+            monto_mbext = round(monto, 2)
+            resumen_ant = (prev_data or {}).get('resumen_banco_anterior', [])
+            match_ant = None
+
+            # Primero: match por categoría probable + importe.
+            for x in resumen_ant:
+                imp_ant = round(float(x.get('importe', 0) or 0), 2)
+                texto_ant = f"{x.get('concepto','')} {x.get('cuenta','')} {x.get('tratamiento','')}".upper()
+                cats_ant = classify_mbext_movimiento(texto_ant)
+                if abs(imp_ant - monto_mbext) < 1.00 and (not categorias or set(categorias).intersection(set(cats_ant))):
+                    match_ant = x
+                    break
+
+            # Segundo: si no hubo categoría clara, match solo por importe único.
+            if match_ant is None:
+                matches_importe = [
+                    x for x in resumen_ant
+                    if abs(round(float(x.get('importe', 0) or 0), 2) - monto_mbext) < 1.00
+                ]
+                if len(matches_importe) == 1:
+                    match_ant = matches_importe[0]
+
+            if match_ant is not None:
+                flexxus.loc[idx, 'Matched'] = True
+                flexxus.loc[idx, 'BancoFecha'] = flexxus.loc[idx, 'FechaFlexxus']
+                flexxus.loc[idx, 'BancoComprobante'] = 'Conciliación anterior'
+                flexxus.loc[idx, 'BancoConcepto'] = (
+                    f"Regularización: {match_ant.get('concepto','')} "
+                    f"(egreso banco período anterior $ {monto_mbext:,.2f})"
+                )
+                flexxus.loc[idx, 'BancoImporte'] = -monto_mbext
+                flexxus.loc[idx, 'Diferencia'] = 0.0
+                flexxus.loc[idx, 'CategoriaMatch'] = 'MB-EXT_REGULARIZACION_ANTERIOR'
+                flexxus.loc[idx, 'FechaAcreditacionUsada'] = flexxus.loc[idx, 'FechaFlexxus']
+                flexxus.loc[idx, 'Diagnostico'] = (
+                    f"Regularización de egreso bancario de conciliación anterior — {match_ant.get('cuenta','')}"
+                )
+            else:
+                # Sin match en banco actual ni conciliación anterior: queda pendiente, no se fuerza.
+                flexxus.loc[idx, 'Matched'] = False
+                flexxus.loc[idx, 'BancoFecha'] = ''
+                flexxus.loc[idx, 'BancoComprobante'] = ''
+                flexxus.loc[idx, 'BancoConcepto'] = 'MB-EXT sin respaldo bancario suficiente'
+                flexxus.loc[idx, 'BancoImporte'] = 0.0
+                flexxus.loc[idx, 'Diferencia'] = monto_mbext
+                flexxus.loc[idx, 'CategoriaMatch'] = 'MB-EXT_SIN_MATCH'
+                flexxus.loc[idx, 'FechaAcreditacionUsada'] = ''
+                flexxus.loc[idx, 'Diagnostico'] = (
+                    'REVISAR - MB-EXT no matchea contra banco actual ni conciliación anterior'
+                )
 
     # 3) Regularizaciones QR acumuladas
     # Después del match individual, si queda un PAV cuyo monto coincide con la suma de los QR
@@ -915,11 +975,12 @@ def build_excel(flexxus, bank, qr, trx, r):
     c.font=Font(bold=True,size=11,name='Calibri',color=diff_color); c.fill=diff_fill
 
     # Filas extra: saldo luego de pasar conciliaciones
-    saldo_flexxus_post = r['saldo_f'] - r['A']
-    ws.cell(r_num+4,1,'SALDO FINAL FLEXXUS PASANDO LAS CONCILIACIONES').font=norm
+    # B19 = Flexxus - C1 + C2. B20 = cálculo completo, no el extracto hardcodeado.
+    saldo_flexxus_post = r['saldo_f'] - r['A'] + r['B']
+    ws.cell(r_num+4,1,'SALDO FINAL FLEXXUS PASANDO LAS CONCILIACIONES (Flex - C1 + C2)').font=norm
     c=ws.cell(r_num+4,2,saldo_flexxus_post); c.number_format=money_fmt
-    ws.cell(r_num+5,1,'SALDO LUEGO DE PASAR TODO').font=norm
-    c=ws.cell(r_num+5,2,r['saldo_extracto']); c.number_format=money_fmt
+    ws.cell(r_num+5,1,'SALDO LUEGO DE PASAR TODO (Flex - C1 + C2 + C3 - C4)').font=norm
+    c=ws.cell(r_num+5,2,r['calc_final']); c.number_format=money_fmt
 
     # Detalle diferencias por bloque
     r_num=22
@@ -1146,12 +1207,17 @@ def build_excel(flexxus, bank, qr, trx, r):
     ws_reg.cell(1,1,'Regularizaciones y ajustes ya incorporados').font=sub_f
     hw(ws_reg,2,['Concepto','Fecha Flexxus','Tipo','Número','Movimiento','Cant. banco','Importe','Observación'])
     rn=3
-    reg_items=r['matched'][r['matched']['Diagnostico'].str.contains('Regularización',na=False)]
-    for _,fr in reg_items.iterrows():
-        dw(ws_reg,rn,['QR período anterior acreditado',fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],
-                      fr['Movimiento'],'',fr['MontoFlexxus'],fr['Diagnostico']],mc=[7]); rn+=1
-    if rn==3:
+    reg_items = r['matched'][r['matched']['Diagnostico'].str.contains('Regularización|regularización', na=False)]
+    if len(reg_items) == 0:
         ws_reg.cell(3,1,'Sin regularizaciones en este período').font=norm
+    else:
+        for _,fr in reg_items.iterrows():
+            tipo_reg = (
+                'MB-EXT regularización anterior' if 'REGULARIZACION_ANTERIOR' in str(fr.get('CategoriaMatch',''))
+                else 'QR período anterior'
+            )
+            dw(ws_reg,rn,[tipo_reg,fr['FechaFlexxus'],fr['Tipo'],fr['Numero'],
+                          fr['Movimiento'],'',fr['MontoFlexxus'],fr['BancoConcepto']],mc=[7]); rn+=1
     aw(ws_reg)
 
     # ── HOJA 7: CARGA FLEXXUS ──
@@ -1637,13 +1703,18 @@ with tab_conc:
                     qr_df      = parse_qr(f_qr)
                     trx_df     = parse_trx(f_trx)
 
-                    flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df, qr_df, trx_df)
-                    res = compute_results(flexxus_df, banco_df)
-
-                    # ── Trazabilidad con conciliación anterior ──
+                    # ── Leer conciliación anterior ANTES del matching ──
+                    # Es necesaria para matchear MB-EXT actuales contra impuestos/gastos
+                    # de la conciliación anterior cargados luego por total.
                     prev_data = None
                     if f_prev is not None:
                         prev_data = parse_prev_conciliacion(f_prev)
+
+                    flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df, qr_df, trx_df, prev_data)
+                    res = compute_results(flexxus_df, banco_df)
+
+                    # ── Trazabilidad con conciliación anterior ──
+                    if f_prev is not None:
                         if 'error' in prev_data:
                             st.warning(f"⚠️ No se pudo leer la conciliación anterior: {prev_data['error']}")
                             prev_data = None
@@ -1791,7 +1862,7 @@ with tab_conc:
                                 flexxus_df.attrs['mbext_total'] = flexxus_df.attrs.get('mbext_total', 0) + saldo_extra_mbext
                             # Re-parse banco fresh (bank_avail lists already consumed)
                             banco_df_fresh = parse_banco(f_banco)
-                            flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df_fresh, qr_df, trx_df)
+                            flexxus_df, banco_df = run_conciliacion(flexxus_df, banco_df_fresh, qr_df, trx_df, prev_data)
                             banco_df = banco_df_fresh
                             res = compute_results(flexxus_df, banco_df)
                             # Guardar mapping en historial
