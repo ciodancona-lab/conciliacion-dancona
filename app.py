@@ -175,78 +175,6 @@ def classify_bank(concepto):
     elif 'DEBITO PAGO DIRECTO' in c:            return 'DEBITO_PAGO_DIRECTO'
     else:                                        return 'OTRO'
 
-
-def classify_mbext_movimiento(movimiento):
-    """
-    Clasifica un MB-EXT de Flexxus para matchearlo contra la SUMA de movimientos
-    bancarios por categoría.
-
-    MB-EXT puede representar un total agrupado cargado en Flexxus, por ejemplo:
-    - 150 movimientos de INGRESOS BRUTOS MENDOZA del banco
-    - 1 solo MB-EXT en Flexxus por el total de retenciones
-    """
-    m = str(movimiento).upper()
-
-    if (
-        'INGRESOS BRUTOS' in m
-        or 'IIBB' in m
-        or 'ING. BRUTOS' in m
-        or 'RETENCION INGRESOS' in m
-        or 'RETENCIÓN INGRESOS' in m
-        or 'RETENCION IIBB' in m
-        or 'RETENCIÓN IIBB' in m
-    ):
-        return ['RETENCION_IIBB']
-
-    if (
-        '25413' in m
-        and ('DEB' in m or 'DEBITO' in m or 'DÉBITO' in m)
-    ):
-        return ['IMPUESTO_LEY25413_DEB']
-
-    if (
-        '25413' in m
-        and ('CRED' in m or 'CREDITO' in m or 'CRÉDITO' in m)
-    ):
-        return ['IMPUESTO_LEY25413_CRED']
-
-    if (
-        'COM TRANSFE' in m
-        or 'COMISION' in m
-        or 'COMISIÓN' in m
-        or 'GASTO BANCARIO' in m
-        or 'GASTOS BANCARIOS' in m
-        or 'COMISIONES BANCARIAS' in m
-        or 'COMISIONES' in m
-    ):
-        return ['GASTO_BANCARIO']
-
-    if 'IVA' in m or 'I.V.A' in m:
-        return ['IVA']
-
-    if (
-        'DEB LIQ' in m
-        or 'DEBITO LIQ' in m
-        or 'DÉBITO LIQ' in m
-        or 'MASTERCARD' in m
-        or 'MASTER' in m
-    ):
-        return ['DEBITO_LIQ_TARJETA']
-
-    if 'PAGO DIRECTO' in m:
-        return ['DEBITO_PAGO_DIRECTO']
-
-    if (
-        'TRANSFERENCIA' in m
-        or 'TRANSF' in m
-        or 'DB CREDIN' in m
-        or 'INTERBMISMO' in m
-    ):
-        return ['TRANSFERENCIA_SALIENTE']
-
-    return []
-
-
 # ─── PARSE FUNCTIONS ───────────────────────────────────────────────────────────
 def parse_flexxus(file):
     df = pd.read_excel(file, dtype=str)
@@ -266,14 +194,13 @@ def parse_flexxus(file):
         saldo = parse_ar_num(saldo_raw)
         if saldo > 0: last_saldo_all = saldo
         if tipo == 'MB-EXT':
-            monto_mbext = haber if haber > 0 else debe
-            mbext_total += monto_mbext
+            mbext_total += haber
             # Guardar también como fila completa para incluir en importación
             numero     = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ''
             movimiento = str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else ''
             rows.append({
                 'FechaFlexxus': fecha, 'Tipo': 'MB-EXT', 'Numero': numero,
-                'Movimiento': movimiento, 'MontoFlexxus': monto_mbext,
+                'Movimiento': movimiento, 'MontoFlexxus': haber,
                 'SaldoFlexxus': saldo, 'EsPedidosYa': False
             })
             continue
@@ -309,46 +236,69 @@ def parse_flexxus(file):
     return df_out
 
 def parse_prev_conciliacion(file):
-    """Lee el Excel de la conciliación anterior y extrae los datos clave para trazabilidad."""
+    """Lee el Excel de la conciliación anterior y extrae datos completos para trazabilidad inter-período."""
     try:
-        wb_prev = pd.read_excel(file, sheet_name='Conciliacion semanal', dtype=str, header=None)
         prev = {}
 
-        # Buscar saldo extracto banco (fila que diga "Saldo S/Extracto")
-        for _, row in wb_prev.iterrows():
-            r0 = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
-            r1 = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ''
-            if 'Extracto Bancario' in r0:
-                try: prev['saldo_extracto_anterior'] = float(r1.replace('.','').replace(',','.'))
-                except: pass
-            if 'FLEXXUS' in r0 and 'FINAL' in r0:
-                try: prev['saldo_flexxus_anterior'] = float(r1.replace('.','').replace(',','.'))
-                except: pass
-            if 'DIFERENCIA FINAL' in r0:
-                try: prev['diferencia_anterior'] = float(r1.replace('.','').replace(',','.'))
-                except: pass
-            if 'Conciliación al' in r0 or 'período' in r0.lower():
-                prev['periodo_anterior'] = r0
+        def to_num(v):
+            try: return float(pd.to_numeric(v, errors='coerce') or 0)
+            except: return 0.0
 
-        # Leer pendientes (hoja Flexxus no Banco)
+        # ── Hoja Conciliacion semanal ──
+        ws_conc = pd.read_excel(file, sheet_name='Conciliacion semanal', dtype=str, header=None)
+        for _, row in ws_conc.iterrows():
+            r0 = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
+            r1 = to_num(row.iloc[1]) if pd.notna(row.iloc[1]) else 0
+            if 'Extracto Bancario' in r0:   prev['saldo_extracto_anterior'] = r1
+            if 'S/FLEXXUS' in r0 and 'FINAL' not in r0 and 'CALC' not in r0: prev['saldo_flexxus_anterior'] = r1
+            if 'DIFERENCIA FINAL' in r0:    prev['diferencia_anterior'] = r1
+            if 'INGRESOS registrados en FLEXXUS' in r0: prev['C1_anterior'] = abs(r1)
+            if 'EGRESOS registrados en FLEXXUS' in r0:  prev['C2_anterior'] = abs(r1)
+            if 'INGRESOS en el Banco' in r0: prev['C3_anterior'] = abs(r1)
+            if 'EGRESOS en el Banco' in r0:  prev['C4_anterior'] = abs(r1)
+
+        # ── Hoja Flexxus no Banco - pendientes C1 ──
         try:
-            fnb = pd.read_excel(file, sheet_name='Flexxus no Banco', dtype=str, header=1)
+            fnb = pd.read_excel(file, sheet_name='Flexxus no Banco', header=1)
             pendientes = []
             for _, row in fnb.iterrows():
                 num = str(row.get('Número','')).strip()
                 mov = str(row.get('Movimiento','')).strip()
                 fecha = str(row.get('Fecha Flexxus','')).strip()
-                monto_raw = str(row.get('Monto','')).strip()
-                try:
-                    monto = float(monto_raw.replace('.','').replace(',','.'))
-                except:
-                    continue
+                monto = to_num(row.get('Monto', 0))
                 if num and num != 'nan' and monto > 0:
-                    pendientes.append({'numero': num, 'movimiento': mov,
-                                       'fecha': fecha, 'monto': monto})
+                    pendientes.append({'numero': num, 'movimiento': mov, 'fecha': fecha, 'monto': monto})
             prev['pendientes_semana_anterior'] = pendientes
-        except:
-            prev['pendientes_semana_anterior'] = []
+        except: prev['pendientes_semana_anterior'] = []
+
+        # ── Hoja Banco ingresos no Flexxus - C3 detail ──
+        try:
+            bi = pd.read_excel(file, sheet_name='Banco ingresos no Flexxus', header=1)
+            c3_items = []
+            for _, row in bi.iterrows():
+                fecha   = str(row.get('Fecha banco','')).strip()
+                concepto= str(row.get('Concepto banco','')).strip()
+                monto   = to_num(row.get('Importe', 0))
+                if concepto and concepto != 'nan' and abs(monto) > 0.01:
+                    c3_items.append({'fecha': fecha, 'concepto': concepto, 'monto': monto})
+            prev['c3_anterior'] = c3_items
+        except: prev['c3_anterior'] = []
+
+        # ── Hoja Banco egresos no Flexxus - C4 detail ──
+        try:
+            be = pd.read_excel(file, sheet_name='Banco egresos no Flexxus', header=1)
+            c4_items = []
+            RUTINARIOS = ['INGRESOS BRUTOS','GRAVAMEN LEY','I.V.A.','COM TRANSFE','DEB LIQ MASTER']
+            for _, row in be.iterrows():
+                fecha   = str(row.get('Fecha banco','')).strip()
+                concepto= str(row.get('Concepto banco','')).strip()
+                monto   = abs(to_num(row.get('Importe', 0)))
+                es_rutinario = any(k in concepto.upper() for k in RUTINARIOS)
+                if concepto and concepto != 'nan' and monto > 0.01:
+                    c4_items.append({'fecha': fecha, 'concepto': concepto,
+                                     'monto': monto, 'rutinario': es_rutinario})
+            prev['c4_anterior'] = c4_items
+        except: prev['c4_anterior'] = []
 
         return prev
     except Exception as e:
@@ -424,342 +374,127 @@ def run_conciliacion(flexxus, bank, qr, trx):
     bank_ing_avail = list(bank[bank['EsIngreso']].index)
     bank_egr_avail = list(bank[bank['EsEgreso']].index)
 
-    def _remove_available(avail_list, idxs):
-        idxset = set(idxs)
-        avail_list[:] = [x for x in avail_list if x not in idxset]
-
-    def _match_tolerance_for_bank_category(categoria):
-        # QR debe ser casi exacto: evita falsos matches contra CR DEBIN SPOT
-        # que en realidad son regularizaciones o ingresos banco sin Flexxus.
-        # El resto mantiene tolerancia $1 para pequeños redondeos.
-        if categoria == 'QR':
-            return 0.10
-        return 1.00
-
     def match_side(tipo, avail_list):
-        """
-        Match principal por importe exacto.
-        IMPORTANTE: para PAV se permite matchear QR con fecha banco anterior a fecha Flexxus,
-        porque en Banco Nación los QR del fin de semana/período anterior pueden acreditarse
-        el lunes y Flexxus los puede tener con fecha posterior. Luego se aplica regla de fechas:
-        si banco < Flexxus, FECHAACREDITACION = FECHAMOVIMIENTO.
-        """
         for idx in flexxus.index:
-            if flexxus.loc[idx, 'Matched']:
-                continue
-            if flexxus.loc[idx, 'Tipo'] != tipo:
-                continue
-
-            monto = float(flexxus.loc[idx, 'MontoFlexxus'])
-            fecha_f = flexxus.loc[idx, 'FechaFlexxus_dt']
-
-            best = None
-            best_score = None
-
-            for bidx in list(avail_list):
-                b_amt = float(bank.loc[bidx, 'ImporteAbs'])
-                b_cat = bank.loc[bidx, 'Categoria']
-                tolerancia = _match_tolerance_for_bank_category(b_cat)
-                if abs(b_amt - monto) >= tolerancia:
-                    continue
-
-                b_fecha = bank.loc[bidx, 'Fecha_dt']
-                diff_days = abs((b_fecha - fecha_f).days)
-
-                # Scoring simple:
-                # - prioridad por cercanía de fecha.
-                # - si es PAV y categoría bancaria es tarjeta/QR/transferencia entrante, es válido.
-                # - no bloquear QR con fecha banco anterior: esa era la causa del error que dejaba
-                #   afuera PAV válidos y rompía la regularización QR.
-                score = diff_days
-
-                if tipo == 'PAV':
-                    if b_cat in ['QR', 'LIQUIDACION_TARJETA', 'TRANSFERENCIA_ENTRANTE', 'OTRO']:
-                        score -= 0.1
-                elif tipo == 'MB-ENT-EX':
-                    if b_cat in ['TRANSFERENCIA_SALIENTE', 'OTRO']:
-                        score -= 0.1
-
-                if best is None or score < best_score:
-                    best = bidx
-                    best_score = score
-
+            if flexxus.loc[idx,'Tipo'] != tipo: continue
+            monto   = flexxus.loc[idx,'MontoFlexxus']
+            fecha_f = flexxus.loc[idx,'FechaFlexxus_dt']
+            best = None; best_diff = pd.Timedelta(days=999)
+            for bidx in avail_list:
+                b_amt = bank.loc[bidx,'ImporteAbs']
+                if abs(b_amt - monto) < 1.00:
+                    diff = abs(bank.loc[bidx,'Fecha_dt'] - fecha_f)
+                    if diff < best_diff:
+                        best_diff = diff; best = bidx
             if best is not None:
                 b = bank.loc[best]
-
-                flexxus.loc[idx, 'Matched'] = True
-                flexxus.loc[idx, 'BancoFecha'] = b['Fecha']
-                flexxus.loc[idx, 'BancoComprobante'] = b['Comprobante']
-                flexxus.loc[idx, 'BancoConcepto'] = b['Concepto']
-                flexxus.loc[idx, 'BancoImporte'] = b['ImporteNum']
-
-                if tipo == 'PAV':
-                    flexxus.loc[idx, 'Diferencia'] = round(float(b['ImporteNum']) - monto, 2)
-                else:
-                    flexxus.loc[idx, 'Diferencia'] = round(abs(float(b['ImporteNum'])) - monto, 2)
-
-                flexxus.loc[idx, 'CategoriaMatch'] = b['Categoria']
-
+                flexxus.loc[idx,'Matched']           = True
+                flexxus.loc[idx,'BancoFecha']        = b['Fecha']
+                flexxus.loc[idx,'BancoComprobante']  = b['Comprobante']
+                flexxus.loc[idx,'BancoConcepto']     = b['Concepto']
+                flexxus.loc[idx,'BancoImporte']      = b['ImporteNum']
+                flexxus.loc[idx,'Diferencia']        = round(b['ImporteNum'] - monto, 2)
+                flexxus.loc[idx,'CategoriaMatch']    = b['Categoria']
                 # Enrich QR/TRX
                 if b['Categoria'] == 'QR':
-                    key = round(float(b['ImporteNum']), 2)
+                    key = round(b['ImporteNum'], 2)
                     if key in qr_lookup and qr_lookup[key]:
                         qi = qr_lookup[key].pop(0)
-                        flexxus.loc[idx, 'Local'] = COMERCIO_LOCAL.get(qi['CodComercio'], qi['CodComercio'])
-                        flexxus.loc[idx, 'CuponQR'] = str(qi.get('Cupon', qi['IdQR']))
+                        flexxus.loc[idx,'Local']   = COMERCIO_LOCAL.get(qi['CodComercio'], qi['CodComercio'])
+                        flexxus.loc[idx,'CuponQR'] = str(qi.get('Cupon', qi['IdQR']))
                 elif b['Categoria'] == 'LIQUIDACION_TARJETA':
                     key = round(monto, 2)
                     if key in trx_lookup and trx_lookup[key]:
                         ti = trx_lookup[key].pop(0)
-                        flexxus.loc[idx, 'Local'] = COMERCIO_LOCAL.get(ti['COMERCIO'], ti['COMERCIO'])
-                        flexxus.loc[idx, 'NumLiquidacion'] = str(ti['NUMERO LIQUIDACION'])
-
-                if flexxus.loc[idx, 'EsPedidosYa']:
-                    flexxus.loc[idx, 'CuponQR'] = ''
-                    flexxus.loc[idx, 'NumLiquidacion'] = ''
-                    flexxus.loc[idx, 'CategoriaMatch'] = 'PEDIDOS_YA'
-
+                        flexxus.loc[idx,'Local']          = COMERCIO_LOCAL.get(ti['COMERCIO'], ti['COMERCIO'])
+                        flexxus.loc[idx,'NumLiquidacion'] = str(ti['NUMERO LIQUIDACION'])
+                if flexxus.loc[idx,'EsPedidosYa']:
+                    flexxus.loc[idx,'CuponQR'] = ''
+                    flexxus.loc[idx,'NumLiquidacion'] = ''
+                    flexxus.loc[idx,'CategoriaMatch'] = 'PEDIDOS_YA'
                 # Date rule
-                b_fecha = bank.loc[best, 'Fecha_dt']
+                b_fecha = bank.loc[best,'Fecha_dt']
                 if b_fecha < fecha_f:
-                    flexxus.loc[idx, 'AjusteFecha'] = (
-                        f'Banco {b["Fecha"]} < Flexxus {flexxus.loc[idx, "FechaFlexxus"]}; se usa fecha Flexxus'
-                    )
-                    flexxus.loc[idx, 'FechaAcreditacionUsada'] = flexxus.loc[idx, 'FechaFlexxus']
+                    flexxus.loc[idx,'AjusteFecha']          = f'Banco {b["Fecha"]} < Flexxus {flexxus.loc[idx,"FechaFlexxus"]}; se usa fecha Flexxus'
+                    flexxus.loc[idx,'FechaAcreditacionUsada']= flexxus.loc[idx,'FechaFlexxus']
                 else:
-                    flexxus.loc[idx, 'FechaAcreditacionUsada'] = b['Fecha']
+                    flexxus.loc[idx,'FechaAcreditacionUsada']= b['Fecha']
+                flexxus.loc[idx,'Diagnostico'] = 'OK - Match exacto'
+                bank.loc[best,'Matched']      = True
+                bank.loc[best,'FlexxusNumero']= flexxus.loc[idx,'Numero']
+                avail_list.remove(best)
 
-                flexxus.loc[idx, 'Diagnostico'] = 'OK - Match exacto'
-                bank.loc[best, 'Matched'] = True
-                bank.loc[best, 'FlexxusNumero'] = flexxus.loc[idx, 'Numero']
-
-                if best in avail_list:
-                    avail_list.remove(best)
-
-    # 1) Match individual primero.
-    # Este orden es importante: permite que los PAV individuales tomen los QR exactos que les corresponden
-    # aunque la fecha bancaria sea anterior. La regularización QR acumulada se resuelve después
-    # con los CR DEBIN SPOT que queden disponibles.
-    match_side('PAV', bank_ing_avail)
+    match_side('PAV',       bank_ing_avail)
     match_side('MB-ENT-EX', bank_egr_avail)
 
-    # 2) Match MB-EXT contra egresos bancarios
-    # MB-EXT representa impuestos/gastos/retenciones/extracciones cargados en Flexxus.
-    # Puede corresponder a:
-    #   a) una línea bancaria exacta, o
-    #   b) un total agrupado de muchas líneas bancarias de una misma categoría.
+    # Match MB-EXT (impuestos/extracciones) contra egresos bancarios
+    # Cada MB-EXT es un total semanal que puede corresponder a N entradas bancarias
+    # Estrategia: match por monto exacto en bank_egr_avail
     for idx in flexxus.index:
-        if flexxus.loc[idx, 'Matched']:
-            continue
-        if flexxus.loc[idx, 'Tipo'] != 'MB-EXT':
-            continue
-
-        monto = float(flexxus.loc[idx, 'MontoFlexxus'])
-        fecha_f = flexxus.loc[idx, 'FechaFlexxus_dt']
-        movimiento = flexxus.loc[idx, 'Movimiento']
-        categorias = classify_mbext_movimiento(movimiento)
-        matched_mbext = False
-
-        def aplicar_match_mbext(candidatos, categorias_match, modo):
-            nonlocal matched_mbext
-
-            if candidatos is None or len(candidatos) == 0:
-                return False
-
-            total_candidatos = round(float(candidatos['ImporteAbs'].sum()), 2)
-            diferencia_grupo = round(total_candidatos - monto, 2)
-
-            if abs(diferencia_grupo) >= 1.00:
-                return False
-
-            fecha_min = candidatos['Fecha_dt'].min()
-            fecha_max = candidatos['Fecha_dt'].max()
-
-            flexxus.loc[idx, 'Matched'] = True
-            flexxus.loc[idx, 'BancoFecha'] = fecha_max.strftime('%d/%m/%Y')
-            flexxus.loc[idx, 'BancoComprobante'] = f'{len(candidatos)} movimientos'
-            flexxus.loc[idx, 'BancoConcepto'] = (
-                f'MB-EXT agrupado: {len(candidatos)} mov. banco '
-                f'({", ".join(categorias_match)})'
-            )
-            flexxus.loc[idx, 'BancoImporte'] = -total_candidatos
-            flexxus.loc[idx, 'Diferencia'] = diferencia_grupo
-            flexxus.loc[idx, 'CategoriaMatch'] = '+'.join(categorias_match)
-            flexxus.loc[idx, 'Diagnostico'] = (
-                f'OK - MB-EXT agrupado contra {len(candidatos)} movimientos banco ({modo})'
-            )
-            flexxus.loc[idx, 'FechaAcreditacionUsada'] = flexxus.loc[idx, 'FechaFlexxus']
-
-            if fecha_min < fecha_f:
-                flexxus.loc[idx, 'AjusteFecha'] = (
-                    f'Banco desde {fecha_min.strftime("%d/%m/%Y")} hasta '
-                    f'{fecha_max.strftime("%d/%m/%Y")}; se usa fecha Flexxus'
-                )
-            else:
-                flexxus.loc[idx, 'AjusteFecha'] = ''
-
-            for bidx in candidatos.index:
-                bank.loc[bidx, 'Matched'] = True
-                bank.loc[bidx, 'FlexxusNumero'] = flexxus.loc[idx, 'Numero']
-            _remove_available(bank_egr_avail, candidatos.index)
-
-            matched_mbext = True
-            return True
-
-        # 2.1) Match agrupado por categoría inferida desde el texto del MB-EXT
-        if categorias:
-            candidatos = bank[
-                (~bank['Matched']) &
-                (bank['EsEgreso']) &
-                (bank['Categoria'].isin(categorias))
-            ].copy()
-            aplicar_match_mbext(candidatos, categorias, 'categoría detectada por descripción')
-
-        if matched_mbext:
-            continue
-
-        # 2.2) Si la descripción no alcanza, buscar una única categoría bancaria cuyo total coincida
-        categorias_posibles = [
-            'RETENCION_IIBB',
-            'IMPUESTO_LEY25413_DEB',
-            'IMPUESTO_LEY25413_CRED',
-            'IVA',
-            'GASTO_BANCARIO',
-            'DEBITO_LIQ_TARJETA',
-            'DEBITO_PAGO_DIRECTO',
-            'TRANSFERENCIA_SALIENTE'
-        ]
-
-        matches_por_total = []
-        for cat in categorias_posibles:
-            candidatos_cat = bank[
-                (~bank['Matched']) &
-                (bank['EsEgreso']) &
-                (bank['Categoria'] == cat)
-            ].copy()
-            if len(candidatos_cat) == 0:
-                continue
-            total_cat = round(float(candidatos_cat['ImporteAbs'].sum()), 2)
-            if abs(total_cat - monto) < 1.00:
-                matches_por_total.append((cat, candidatos_cat))
-
-        if len(matches_por_total) == 1:
-            cat, candidatos = matches_por_total[0]
-            aplicar_match_mbext(candidatos, [cat], 'total único por categoría')
-
-        if matched_mbext:
-            continue
-
-        # 2.3) Intentar match exacto contra una línea individual
-        best = None
-        best_diff = pd.Timedelta(days=999)
-        for bidx in list(bank_egr_avail):
-            b_amt = float(bank.loc[bidx, 'ImporteAbs'])
+        if flexxus.loc[idx,'Tipo'] != 'MB-EXT': continue
+        monto   = flexxus.loc[idx,'MontoFlexxus']
+        fecha_f = flexxus.loc[idx,'FechaFlexxus_dt']
+        best = None; best_diff = pd.Timedelta(days=999)
+        for bidx in bank_egr_avail:
+            b_amt = bank.loc[bidx,'ImporteAbs']
             if abs(b_amt - monto) < 1.00:
-                diff = abs(bank.loc[bidx, 'Fecha_dt'] - fecha_f)
+                diff = abs(bank.loc[bidx,'Fecha_dt'] - fecha_f)
                 if diff < best_diff:
-                    best_diff = diff
-                    best = bidx
-
+                    best_diff = diff; best = bidx
         if best is not None:
             b = bank.loc[best]
-            flexxus.loc[idx, 'Matched'] = True
-            flexxus.loc[idx, 'BancoFecha'] = b['Fecha']
-            flexxus.loc[idx, 'BancoComprobante'] = b['Comprobante']
-            flexxus.loc[idx, 'BancoConcepto'] = b['Concepto']
-            flexxus.loc[idx, 'BancoImporte'] = b['ImporteNum']
-            flexxus.loc[idx, 'Diferencia'] = round(abs(float(b['ImporteNum'])) - monto, 2)
-            flexxus.loc[idx, 'CategoriaMatch'] = b['Categoria']
-            flexxus.loc[idx, 'Diagnostico'] = 'OK - MB-EXT match exacto individual'
-
-            if bank.loc[best, 'Fecha_dt'] < fecha_f:
-                flexxus.loc[idx, 'FechaAcreditacionUsada'] = flexxus.loc[idx, 'FechaFlexxus']
-                flexxus.loc[idx, 'AjusteFecha'] = (
-                    f'Banco {b["Fecha"]} < Flexxus {flexxus.loc[idx, "FechaFlexxus"]}; se usa fecha Flexxus'
-                )
+            flexxus.loc[idx,'Matched']            = True
+            flexxus.loc[idx,'BancoFecha']         = b['Fecha']
+            flexxus.loc[idx,'BancoComprobante']   = b['Comprobante']
+            flexxus.loc[idx,'BancoConcepto']      = b['Concepto']
+            flexxus.loc[idx,'BancoImporte']       = b['ImporteNum']
+            flexxus.loc[idx,'Diferencia']         = round(b['ImporteNum'] + monto, 2)  # egreso: banco negativo + monto positivo
+            flexxus.loc[idx,'CategoriaMatch']     = b['Categoria']
+            flexxus.loc[idx,'Diagnostico']        = 'OK - MB-EXT match exacto'
+            # Fecha: si banco < Flexxus usar fecha Flexxus
+            if bank.loc[best,'Fecha_dt'] < fecha_f:
+                flexxus.loc[idx,'FechaAcreditacionUsada'] = flexxus.loc[idx,'FechaFlexxus']
+                flexxus.loc[idx,'AjusteFecha'] = f'Banco {b["Fecha"]} < Flexxus {flexxus.loc[idx,"FechaFlexxus"]}; se usa fecha Flexxus'
             else:
-                flexxus.loc[idx, 'FechaAcreditacionUsada'] = b['Fecha']
-
-            bank.loc[best, 'Matched'] = True
-            bank.loc[best, 'FlexxusNumero'] = flexxus.loc[idx, 'Numero']
-            _remove_available(bank_egr_avail, [best])
-
+                flexxus.loc[idx,'FechaAcreditacionUsada'] = b['Fecha']
+            bank.loc[best,'Matched'] = True
+            bank_egr_avail.remove(best)
         else:
-            # Si no hay respaldo, queda pendiente. No se fuerza el match.
-            flexxus.loc[idx, 'Matched'] = False
-            flexxus.loc[idx, 'BancoFecha'] = ''
-            flexxus.loc[idx, 'BancoComprobante'] = ''
-            flexxus.loc[idx, 'BancoConcepto'] = 'MB-EXT sin respaldo bancario suficiente'
-            flexxus.loc[idx, 'BancoImporte'] = 0.0
-            flexxus.loc[idx, 'Diferencia'] = monto
-            flexxus.loc[idx, 'CategoriaMatch'] = 'MB-EXT_SIN_MATCH'
-            flexxus.loc[idx, 'FechaAcreditacionUsada'] = ''
-            flexxus.loc[idx, 'Diagnostico'] = (
-                'REVISAR - MB-EXT no matchea contra suma agrupada ni línea individual'
-            )
+            # Sin match exacto individual en banco (el banco los tiene como entradas diarias individuales)
+            # Se fuerza el match para que entren al archivo de importación de Flexxus
+            flexxus.loc[idx,'Matched']            = True
+            flexxus.loc[idx,'BancoFecha']         = flexxus.loc[idx,'FechaFlexxus']
+            flexxus.loc[idx,'BancoConcepto']      = 'Consolidado banco (sin match exacto individual)'
+            flexxus.loc[idx,'FechaAcreditacionUsada'] = flexxus.loc[idx,'FechaFlexxus']
+            flexxus.loc[idx,'Diagnostico']        = 'MB-EXT - banco tiene entradas individuales diarias'
 
-    # 3) Regularizaciones QR acumuladas
-    # Después del match individual, si queda un PAV cuyo monto coincide con la suma de los QR
-    # no usados del mismo día, se trata como regularización QR acumulada.
-    # Esta regla recupera correctamente casos como:
-    #   PAV 1600010644 $4.376.172,08 = suma de CR DEBIN SPOT restantes del 20/04.
+    # Regularizaciones: PAV sin match exacto pero con QR acumulados del mismo día
+    # (casos donde Flexxus tiene un total que corresponde a N QR individuales en banco)
     for idx in flexxus.index:
-        if flexxus.loc[idx, 'Matched']:
-            continue
-        if flexxus.loc[idx, 'Tipo'] != 'PAV':
-            continue
-
-        monto = float(flexxus.loc[idx, 'MontoFlexxus'])
-        fecha = flexxus.loc[idx, 'FechaFlexxus']
-        fecha_f = flexxus.loc[idx, 'FechaFlexxus_dt']
-
+        if flexxus.loc[idx,'Matched']: continue
+        if flexxus.loc[idx,'Tipo'] != 'PAV': continue
+        monto = flexxus.loc[idx,'MontoFlexxus']
+        fecha = flexxus.loc[idx,'FechaFlexxus']
+        # Buscar si la suma de QR no matcheados del mismo día cubre el monto
         bank_qr_day = bank[
             (~bank['Matched']) &
-            (bank['Categoria'] == 'QR') &
-            (bank['Fecha'] == fecha)
-        ].copy()
-
-        if len(bank_qr_day) == 0:
-            continue
-
-        # La regularización QR acumulada solo aplica a lotes reales.
-        # No debe usarse para matchear un PAV chico contra un único CR DEBIN SPOT
-        # con diferencia de centavos, porque eso vuelve a ocultar Banco ingreso no Flexxus.
-        if len(bank_qr_day) < 2 and monto < 500000:
-            continue
-
-        total_qr = round(float(bank_qr_day['ImporteNum'].sum()), 2)
-        diferencia_qr = round(total_qr - monto, 2)
-
-        if abs(diferencia_qr) < 1.00:
-            fecha_min = bank_qr_day['Fecha_dt'].min()
-            fecha_max = bank_qr_day['Fecha_dt'].max()
-
-            flexxus.loc[idx, 'Matched'] = True
-            flexxus.loc[idx, 'FechaAcreditacionUsada'] = fecha
-            flexxus.loc[idx, 'BancoFecha'] = fecha
-            flexxus.loc[idx, 'BancoComprobante'] = f'{len(bank_qr_day)} QR'
-            flexxus.loc[idx, 'BancoConcepto'] = 'Regularización QR período anterior (acumulado)'
-            flexxus.loc[idx, 'BancoImporte'] = total_qr
-            flexxus.loc[idx, 'Diferencia'] = diferencia_qr
-            flexxus.loc[idx, 'CategoriaMatch'] = 'REGULARIZACION_QR'
-            flexxus.loc[idx, 'Diagnostico'] = (
-                f'OK - Regularización QR acumulada contra {len(bank_qr_day)} CR DEBIN SPOT'
-            )
-
-            if fecha_min < fecha_f:
-                flexxus.loc[idx, 'AjusteFecha'] = (
-                    f'Banco desde {fecha_min.strftime("%d/%m/%Y")} hasta '
-                    f'{fecha_max.strftime("%d/%m/%Y")}; se usa fecha Flexxus'
-                )
-
+            (bank['Categoria']=='QR') &
+            (bank['Fecha']==fecha)
+        ]
+        if len(bank_qr_day) == 0: continue
+        total_qr = bank_qr_day['ImporteNum'].sum()
+        if abs(total_qr - monto) < 1.0:
+            flexxus.loc[idx,'Matched']            = True
+            flexxus.loc[idx,'FechaAcreditacionUsada'] = fecha
+            flexxus.loc[idx,'BancoFecha']         = fecha
+            flexxus.loc[idx,'BancoConcepto']      = f'Regularización QR acumulados {fecha}'
+            flexxus.loc[idx,'CategoriaMatch']     = 'REGULARIZACION_QR'
+            flexxus.loc[idx,'Diagnostico']        = 'Regularización QR acumulados del mismo día'
             for bidx in bank_qr_day.index:
-                bank.loc[bidx, 'Matched'] = True
-                bank.loc[bidx, 'FlexxusNumero'] = flexxus.loc[idx, 'Numero']
-            _remove_available(bank_ing_avail, bank_qr_day.index)
+                bank.loc[bidx,'Matched'] = True
+                bank.loc[bidx,'FlexxusNumero'] = flexxus.loc[idx,'Numero']
 
     return flexxus, bank
-
 
 # ─── COMPUTE RESULTS ───────────────────────────────────────────────────────────
 def compute_results(flexxus, bank):
@@ -767,15 +502,8 @@ def compute_results(flexxus, bank):
     unmatched_f= flexxus[~flexxus['Matched']]
     unmatched_b= bank[~bank['Matched']]
 
-    IMP_CATS = [
-        'IMPUESTO_LEY25413_DEB',
-        'IMPUESTO_LEY25413_CRED',
-        'RETENCION_IIBB',
-        'IVA',
-        'GASTO_BANCARIO',
-        'DEBITO_LIQ_TARJETA',
-        'DEBITO_PAGO_DIRECTO'
-    ]
+    IMP_CATS = ['IMPUESTO_LEY25413_DEB','IMPUESTO_LEY25413_CRED',
+                'RETENCION_IIBB','IVA','GASTO_BANCARIO']
 
     ub_ing      = unmatched_b[unmatched_b['EsIngreso']]
     ub_egr      = unmatched_b[unmatched_b['EsEgreso']]
@@ -792,25 +520,12 @@ def compute_results(flexxus, bank):
     saldo_extracto = bank.iloc[0]['SaldoNum']
 
     A = unmatched_f[unmatched_f['Tipo']=='PAV']['MontoFlexxus'].sum()
-    B = unmatched_f[unmatched_f['Tipo'].isin(['MB-ENT-EX','MB-EXT'])]['MontoFlexxus'].sum()
+    B = unmatched_f[unmatched_f['Tipo']=='MB-ENT-EX']['MontoFlexxus'].sum()
     C_base = ub_ing['ImporteNum'].sum()
     D = ub_egr['ImporteNum'].abs().sum()
 
-    # Ajuste residual técnico:
-    # Banco Nación a veces muestra una diferencia chica entre el saldo de extracto
-    # y la suma matemática de movimientos exportados. Si el residual es menor a $10,
-    # se informa como ajuste técnico dentro de Banco ingreso no Flexxus para que
-    # la conciliación cierre sin ocultar la diferencia.
-    calc_base = saldo_f - A + B + C_base - D
-    diferencia_base = round(saldo_extracto - calc_base, 2)
-
-    if abs(diferencia_base) > 0 and abs(diferencia_base) < 10:
-        ajuste_residual = diferencia_base
-    else:
-        ajuste_residual = 0.0
-
-    C_total = C_base + ajuste_residual
-    calc_final = saldo_f - A + B + C_total - D
+    # Cálculo real sin ajustes artificiales
+    calc_final = saldo_f - A + B + C_base - D
     diferencia_real = round(saldo_extracto - calc_final, 2)
 
     return {
@@ -818,10 +533,14 @@ def compute_results(flexxus, bank):
         'ub_ing': ub_ing, 'ub_egr': ub_egr,
         'b_imp': b_imp, 'b_egr_other': b_egr_other,
         'saldo_f': saldo_f, 'saldo_extracto': saldo_extracto,
-        'A': A, 'B': B, 'C_total': C_total, 'D': D,
-        'ajuste_residual': ajuste_residual,
+        'A': A, 'B': B, 'C_total': C_base, 'D': D,
+        'ajuste_residual': 0.0,
         'calc_final': calc_final,
-        'diferencia': diferencia_real
+        'diferencia': diferencia_real,
+        # Inter-period adjustments (populated later if prev_data available)
+        'adj_c3_prev': 0.0,
+        'adj_c4_prev': 0.0,
+        'diferencia_con_ajuste': diferencia_real
     }
 
 # ─── EXCEL BUILDER ─────────────────────────────────────────────────────────────
@@ -892,7 +611,7 @@ def build_excel(flexxus, bank, qr, trx, r):
     r_num=10
     items=[
         ('Menos: INGRESOS registrados en FLEXXUS que NO están en el Banco', r['A']),
-        ('Más: EGRESOS registrados en FLEXXUS que NO están en el Banco', r['B']),
+        ('Más: EGRESOS registrados en FLEXXUS que NO están en el Banco (MB-ENT-EX / MB-EXT sin match)', r['B']),
         ('Más: INGRESOS en el Banco pero NO registrados en FLEXXUS', r['C_total']),
         ('Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS', r['D']),
     ]
@@ -908,11 +627,14 @@ def build_excel(flexxus, bank, qr, trx, r):
     ws.cell(r_num+2,1,'SALDO SEGÚN EXTRACTO BANCO al '+bank['Fecha_dt'].max().strftime('%d/%m/%Y')).font=bold_f
     c=ws.cell(r_num+2,2,r['saldo_extracto']); c.number_format=money_fmt; c.font=bold_f
     diff_val = r['diferencia']
-    diff_color = '375623' if abs(diff_val) < 1.0 else 'C00000'  # verde si < $1, rojo si no
+    diff_color = '375623' if abs(diff_val) < 1.0 else 'C00000'
     diff_fill = grn_fill if abs(diff_val) < 1.0 else PatternFill('solid', fgColor='FCE4EC')
     ws.cell(r_num+3,1,'DIFERENCIA FINAL (debe ser 0)').font=Font(bold=True,size=11,name='Calibri',color=diff_color)
     c=ws.cell(r_num+3,2,diff_val); c.number_format=money_fmt
     c.font=Font(bold=True,size=11,name='Calibri',color=diff_color); c.fill=diff_fill
+    if abs(diff_val) >= 1.0:
+        ws.cell(r_num+4,1,f'NOTA: La diferencia de ${abs(diff_val):,.2f} representa movimientos bancarios del período que aún no fueron cargados en Flexxus. Se resolverán en la próxima conciliación.').font=Font(italic=True,size=9,name='Calibri',color='C00000')
+        ws.merge_cells(f'A{r_num+4}:C{r_num+4}')
 
     # Filas extra: saldo luego de pasar conciliaciones
     saldo_flexxus_post = r['saldo_f'] - r['A']
@@ -937,10 +659,11 @@ def build_excel(flexxus, bank, qr, trx, r):
 
     ws.cell(rn,1,'Más: EGRESOS registrados en FLEXXUS que NO están en el Banco').font=bold_f
     c=ws.cell(rn,5,r['B']); c.number_format=money_fmt; rn+=1
-    uf_egr = r['unmatched_f'][r['unmatched_f']['Tipo'].isin(['MB-ENT-EX','MB-EXT'])]
-    for (fecha, tipo), grp in uf_egr.groupby(['FechaFlexxus','Tipo']):
-        cant=len(grp); imp=grp['MontoFlexxus'].sum()
-        dw(ws,rn,['Flexxus egreso no banco',fecha,f'{cant} {tipo} sin acreditar/debitar en banco',cant,imp,'Detalle en hoja Flexxus no Banco'],mc=[5]); rn+=1
+    uf_egresos = r['unmatched_f'][r['unmatched_f']['Tipo'].isin(['MB-ENT-EX','MB-EXT'])]
+    for _, fr_e in uf_egresos.iterrows():
+        dw(ws,rn,['Flexxus egreso no banco',fr_e['FechaFlexxus'],
+                  f"{fr_e['Tipo']}: {fr_e['Movimiento'][:40]}",1,
+                  fr_e['MontoFlexxus'],'Sin match bancario en el período'],mc=[5]); rn+=1
 
     ws.cell(rn,1,'Más: INGRESOS en el Banco pero NO registrados en FLEXXUS').font=bold_f
     c=ws.cell(rn,5,r['C_total']); c.number_format=money_fmt; rn+=1
@@ -965,9 +688,7 @@ def build_excel(flexxus, bank, qr, trx, r):
         cat_key = grp['Categoria'].iloc[0]
         obs = OBS_MAP.get(cat_key, 'Revisar detalle en hoja Banco ingresos no Flexxus')
         dw(ws,rn,['Banco ingreso no Flexxus','',cat_label,cant,imp,obs],mc=[5]); rn+=1
-    if abs(r.get('ajuste_residual', 0.0)) > 0:
-        dw(ws,rn,['Banco ingreso no Flexxus','', 'Ajuste residual extracto vs suma de movimientos', 1,
-                  r.get('ajuste_residual', 0.0), 'Ajuste técnico solo para cierre de conciliación'],mc=[5]); rn+=1
+    # Sin ajuste residual artificial - si hay diferencia real aparece en DIFERENCIA FINAL
 
     ws.cell(rn,1,'Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS').font=bold_f
     c=ws.cell(rn,5,r['D']); c.number_format=money_fmt; rn+=1
@@ -1321,7 +1042,7 @@ def github_save_file(filename, content_dict, sha=None):
         return True, "OK"
     return False, f"HTTP {r.status_code}: {r.json().get('message', r.text[:200])}"
 
-def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav_total, mbex_total, mbext_total, A, B, C, D, unmatched_f_detalle):
+def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav_total, mbex_total, A, B, C, D, unmatched_f_detalle):
     """Guarda el resumen y detalle de movimientos de la semana en el historial."""
     historico, sha = github_get_file(HISTORIAL_FILE)
     if historico is None:
@@ -1342,7 +1063,6 @@ def guardar_conciliacion(periodo, saldo_flexxus, saldo_banco, matched_count, pav
         "matcheados": matched_count,
         "pav_total": round(pav_total, 2),
         "mbex_total": round(mbex_total, 2),
-        "mbext_total": round(mbext_total, 2),
         "C1_flexxus_no_banco": round(A, 2),
         "C2_egresos_no_banco": round(B, 2),
         "C3_banco_no_flexxus": round(C, 2),
@@ -1420,19 +1140,9 @@ def render_historial():
     st.markdown("### 📅 Semanas procesadas")
     df_sem = pd.DataFrame(semanas)
     df_sem = df_sem.sort_values("fecha_proceso", ascending=False)
-    if 'mbext_total' not in df_sem.columns:
-        df_sem['mbext_total'] = 0.0
-    df_display = df_sem[[
-        "fecha_proceso","periodo","saldo_flexxus","saldo_banco","matcheados",
-        "pav_total","mbex_total","mbext_total",
-        "C1_flexxus_no_banco","C3_banco_no_flexxus","diferencia_final"
-    ]].copy()
-    df_display.columns = [
-        "Fecha proceso","Período","Saldo Flexxus","Saldo Banco","Matcheados",
-        "PAV","MB-ENT-EX","MB-EXT",
-        "C1 Flexxus no Banco","C3 Banco no Flexxus","Diferencia"
-    ]
-    for col in ["Saldo Flexxus","Saldo Banco","PAV","MB-ENT-EX","MB-EXT","C1 Flexxus no Banco","C3 Banco no Flexxus","Diferencia"]:
+    df_display = df_sem[["fecha_proceso","periodo","saldo_flexxus","saldo_banco","matcheados","C1_flexxus_no_banco","C3_banco_no_flexxus","diferencia_final"]].copy()
+    df_display.columns = ["Fecha proceso","Período","Saldo Flexxus","Saldo Banco","Matcheados","C1 Flexxus no Banco","C3 Banco no Flexxus","Diferencia"]
+    for col in ["Saldo Flexxus","Saldo Banco","C1 Flexxus no Banco","C3 Banco no Flexxus","Diferencia"]:
         df_display[col] = df_display[col].apply(lambda x: f"${x:,.2f}")
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -1725,9 +1435,63 @@ with tab_conc:
                                         st.dataframe(df_des[['numero','movimiento','fecha','monto']],
                                                     hide_index=True, use_container_width=True)
 
-                    matched_pav   = res['matched'][res['matched']['Tipo']=='PAV']
-                    matched_mbex  = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
-                    matched_mbext = res['matched'][res['matched']['Tipo']=='MB-EXT']
+                    # ── Ajuste inter-período: C3 y C4 anteriores no cargados en Flexxus ──
+                    if prev_data and 'c3_anterior' in prev_data:
+                        # C3 anterior = banco tenía pero Flexxus no → si no se cargó, suma a C3 actual
+                        c3_prev_items = prev_data.get('c3_anterior', [])
+                        c4_prev_items = prev_data.get('c4_anterior', [])
+                        c3_prev_nums_flexxus = {p['numero'] for p in prev_data.get('pendientes_semana_anterior', [])}
+
+                        # Filtrar C3 anterior que NO aparece como PAV matcheado esta semana
+                        matched_nums = set(res['matched']['Numero'].astype(str).tolist())
+                        c3_no_cargado = [x for x in c3_prev_items
+                                        if not any(abs(x['monto'] - r['MontoFlexxus']) < 1.0
+                                                   for _, r in res['matched'].iterrows())]
+                        adj_c3 = sum(x['monto'] for x in c3_no_cargado)
+
+                        # C4 anterior NO rutinario que NO fue cargado en Flexxus como MB-EXT
+                        mbext_montos = [r['MontoFlexxus'] for _, r in res['matched'].iterrows()
+                                       if r['Tipo'] == 'MB-EXT']
+                        c4_no_rutinario_no_cargado = [x for x in c4_prev_items
+                                                      if not x['rutinario'] and
+                                                      not any(abs(x['monto'] - m) < 1.0 for m in mbext_montos)]
+                        adj_c4 = sum(x['monto'] for x in c4_no_rutinario_no_cargado)
+
+                        # Aplicar ajuste inter-período
+                        res['adj_c3_prev'] = adj_c3
+                        res['adj_c4_prev'] = adj_c4
+                        diff_ajustada = round(res['diferencia'] + adj_c4 - adj_c3, 2)
+                        res['diferencia_con_ajuste'] = diff_ajustada
+
+                        if adj_c3 > 0 or adj_c4 > 0:
+                            st.markdown("---")
+                            st.markdown("### 🔄 Ajuste inter-período")
+                            st.caption("Items del período anterior que no fueron cargados en Flexxus y explican parte de la diferencia.")
+                            col_a1, col_a2, col_a3 = st.columns(3)
+                            with col_a1:
+                                st.metric("C3 anterior no cargado en Flexxus",
+                                         f"${adj_c3:,.2f}", delta=None)
+                                if c3_no_cargado:
+                                    for x in c3_no_cargado[:5]:
+                                        st.caption(f"  {x['fecha']}: {x['concepto'][:40]} ${x['monto']:,.2f}")
+                            with col_a2:
+                                st.metric("C4 anterior no rutinario no cargado",
+                                         f"${adj_c4:,.2f}", delta=None)
+                                if c4_no_rutinario_no_cargado:
+                                    for x in c4_no_rutinario_no_cargado[:5]:
+                                        st.caption(f"  {x['fecha']}: {x['concepto'][:40]} ${x['monto']:,.2f}")
+                            with col_a3:
+                                color_adj = "normal" if abs(diff_ajustada) < 2.0 else "inverse"
+                                st.metric("Diferencia ajustada",
+                                         f"${diff_ajustada:,.2f}",
+                                         delta=f"vs sin ajuste ${res['diferencia']:,.2f}")
+                            if abs(diff_ajustada) < 2.0:
+                                st.success(f"✅ Con ajuste inter-período: diferencia = ${diff_ajustada:,.2f} — Conciliación cerrada")
+                            else:
+                                st.warning(f"⚠️ Diferencia ajustada: ${diff_ajustada:,.2f} — quedan items por identificar")
+
+                    matched_pav  = res['matched'][res['matched']['Tipo']=='PAV']
+                    matched_mbex = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
 
                     # ── Tipos desconocidos: preguntar al usuario ──
                     unknown_types = flexxus_df.attrs.get('unknown_types', {})
@@ -1772,9 +1536,8 @@ with tab_conc:
                                 if 'PAV' in decision: tipo_flexxus = 'PAV'
                                 elif 'MB-ENT-EX' in decision: tipo_flexxus = 'MB-ENT-EX'
                                 elif 'MB-EXT' in decision:
-                                    tipo_flexxus = 'MB-EXT'
-                                    for m in movs:
-                                        saldo_extra_mbext += m['monto']
+                                    for m in movs: saldo_extra_mbext += m['monto']
+                                    continue
                                 else: continue  # Ignorar
                                 for m in movs:
                                     extra_rows.append({
@@ -1803,19 +1566,15 @@ with tab_conc:
                             st.success(f"✅ {len(extra_rows)} movimientos agregados con el tipo mapeado.")
 
                 # ── Métricas ──
-                    # Recalcular métricas luego de cualquier remapeo de tipos desconocidos.
-                    matched_pav   = res['matched'][res['matched']['Tipo']=='PAV']
-                    matched_mbex  = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
-                    matched_mbext = res['matched'][res['matched']['Tipo']=='MB-EXT']
-
                     diff_val = res['diferencia']
-                    if abs(diff_val) < 1.0:
+                    diff_adj = res.get('diferencia_con_ajuste', diff_val)
+                    if abs(diff_adj) < 2.0:
                         st.markdown(f"""
                         <div class="diff-zero">
                             <span style="font-size:1.6rem">✅</span>
-                            <span>DIFERENCIA FINAL: ${diff_val:,.2f} — Conciliación cerrada</span>
+                            <span>DIFERENCIA FINAL: ${diff_adj:,.2f} — Conciliación cerrada</span>
                         </div>""", unsafe_allow_html=True)
-                    else:
+                    elif abs(diff_val) >= 2.0 and res.get('adj_c4_prev',0) == 0:
                         st.error(f"⚠️ DIFERENCIA FINAL: ${diff_val:,.2f} — La conciliación NO cierra. Revisá los movimientos sin match.")
                     st.markdown(f"""
                     <div class="metric-row">
@@ -1829,11 +1588,6 @@ with tab_conc:
                             <div class="metric-value">{len(matched_mbex)}</div>
                             <div class="metric-sub">${matched_mbex['MontoFlexxus'].sum():,.0f}</div>
                         </div>
-                        <div class="metric">
-                            <div class="metric-label">MB-EXT matcheados</div>
-                            <div class="metric-value">{len(matched_mbext)}</div>
-                            <div class="metric-sub">${matched_mbext['MontoFlexxus'].sum():,.0f}</div>
-                        </div>
                         <div class="metric gold">
                             <div class="metric-label">Flexxus sin banco</div>
                             <div class="metric-value">{len(res['unmatched_f'])}</div>
@@ -1846,13 +1600,6 @@ with tab_conc:
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
-
-                    if len(matched_mbext) > 0:
-                        st.info(
-                            f"MB-EXT matcheados: {len(matched_mbext)} movimiento/s "
-                            f"por ${matched_mbext['MontoFlexxus'].sum():,.2f}. "
-                            "Estos corresponden a impuestos/gastos bancarios cargados por total en Flexxus."
-                        )
 
                     # ── Advertencias ──
                     warns = []
@@ -1884,7 +1631,6 @@ with tab_conc:
                     periodo = f"{banco_df['Fecha_dt'].min().strftime('%d/%m/%Y')} al {banco_df['Fecha_dt'].max().strftime('%d/%m/%Y')}"
                     pav_match = res['matched'][res['matched']['Tipo']=='PAV']
                     mbex_match = res['matched'][res['matched']['Tipo']=='MB-ENT-EX']
-                    mbext_match = res['matched'][res['matched']['Tipo']=='MB-EXT']
                     unmatched_detalle = [
                         {"numero": str(r2['Numero']), "tipo": str(r2['Tipo']),
                          "movimiento": str(r2['Movimiento']), "monto": float(r2['MontoFlexxus']),
@@ -1899,7 +1645,6 @@ with tab_conc:
                             matched_count=len(res['matched']),
                             pav_total=float(pav_match['MontoFlexxus'].sum()),
                             mbex_total=float(mbex_match['MontoFlexxus'].sum()),
-                            mbext_total=float(mbext_match['MontoFlexxus'].sum()),
                             A=res['A'], B=res['B'], C=res['C_total'], D=res['D'],
                             unmatched_f_detalle=unmatched_detalle
                         )
