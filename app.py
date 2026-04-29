@@ -1251,6 +1251,20 @@ def uploaded_info(file_obj):
     }
 
 
+def files_signature(files_map: dict) -> tuple:
+    """Firma estable de archivos para detectar cambios entre corridas."""
+    signature = []
+    for key in sorted(files_map.keys()):
+        f = files_map[key]
+        signature.append((
+            key,
+            getattr(f, "name", None),
+            getattr(f, "size", None),
+            getattr(f, "type", None),
+        ))
+    return tuple(signature)
+
+
 def render_diagnostics(files_map: dict):
     """Muestra diagnóstico antes de procesar para saber qué versión está corriendo."""
     with st.expander("🧪 Diagnóstico técnico / verificar versión cargada", expanded=False):
@@ -1304,9 +1318,15 @@ def main():
     if "run_requested" not in st.session_state:
         st.session_state.run_requested = False
 
+    current_signature = files_signature(files_map)
+    prev_signature = st.session_state.get("files_signature")
+    if prev_signature != current_signature:
+        st.session_state.run_requested = False
+        st.session_state.files_signature = current_signature
+
     col_run, col_reset = st.columns([2, 1])
     with col_run:
-        if st.button("▶️ Comenzar conciliación", type="primary", use_container_width=True):
+        if st.button("▶️ Iniciar", type="primary", use_container_width=True):
             st.session_state.run_requested = True
             st.session_state.last_error = ""
             st.session_state.last_traceback = ""
