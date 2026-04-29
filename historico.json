@@ -1,22 +1,5 @@
 {
-  "semanas": [
-    {
-      "id": "20260429_030037",
-      "fecha_proceso": "29/04/2026 03:00",
-      "periodo": "27/04/2026 al 27/04/2026",
-      "saldo_flexxus": 24996327.79,
-      "saldo_banco": 27584507.39,
-      "matcheados": 67,
-      "pav_total": 5719879.65,
-      "mbex_total": 12361420.0,
-      "mbext_total": 0.0,
-      "C1_flexxus_no_banco": 347797.13,
-      "C2_egresos_no_banco": 763329.93,
-      "C3_banco_no_flexxus": 4789587.75,
-      "C4_egresos_banco": 184284.9,
-      "diferencia_final": -2432656.05
-    }
-  ],
+  "semanas": [],
   "movimientos": [],
   "tipo_mappings": {
     "": "Ignorar (no incluir)"
