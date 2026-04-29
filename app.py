@@ -1,5 +1,5 @@
 # app_conciliacion_dancona_v2.py
-# Versión estable V3: conciliación continua, pendientes anteriores, regularizaciones, apertura y matching agregado MB-EXT.
+# Versión estable V4,7: conciliación continua, pendientes anteriores, regularizaciones, apertura y matching agregado MB-EXT.
 # Streamlit Cloud requirements sugeridos:
 # streamlit
 # pandas
@@ -39,7 +39,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V4.6",
+    page_title="Conciliación Bancaria Dancona · V4.7",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1314,6 +1314,90 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     pbi = pend_banco_ing()
     pbe = pend_banco_egr()
 
+    def ar_money(v):
+        try:
+            txt = f"{float(v):,.2f}"
+            return txt.replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            return str(v)
+
+    def canonical_flexxus_movement(cat, concepto=""):
+        c = norm_txt(str(concepto))
+        if cat == "RETENCION_IIBB":
+            return "INGRESOS BRUTOS MENDOZA"
+        if cat == "IMPUESTO_LEY25413_DEB":
+            return "GRAVAMEN LEY 25.413 S/DEB"
+        if cat == "IMPUESTO_LEY25413_CRED":
+            return "GRAVAMEN LEY 25.413 S/CRED"
+        if cat == "IVA":
+            return "I.V.A. BASE"
+        if cat == "GASTO_BANCARIO":
+            return "COM TRANSFE ELECTRONICA"
+        if cat == "DEBITO_LIQ_TARJETA":
+            return "DEB LIQ MASTERCARD 24H"
+        if cat == "DEBITO_PAGO_DIRECTO":
+            return "DEBITO PAGO DIRECTO"
+        return str(concepto).strip() or CAT_LABELS.get(cat, cat)
+
+    def flexxus_copy_instruction(cat, monto, fecha="", concepto=""):
+        tipo = "MB-EXT" if cat in IMP_CATS else "MB-ENT-EX"
+        mov = canonical_flexxus_movement(cat, concepto)
+        fecha_txt = f" | Fecha: {fecha}" if fecha else ""
+        return f"Copiar en Flexxus: Tipo={tipo} | Movimiento={mov} | Monto={ar_money(monto)}{fecha_txt}"
+
+    def enrich_flexxus_pending_row(p):
+        monto = float(p.get("Monto", 0.0) or 0.0)
+        concepto = str(p.get("Concepto", ""))
+        tipo = str(p.get("TipoMovimiento", ""))
+        c = norm_txt(concepto)
+        if "PEDIDOS YA" in c:
+            return "", "", "", "", ""
+
+        best_qr = None
+        best_qr_diff = float("inf")
+        if qr is not None and not qr.empty and "NetoQR" in qr.columns:
+            for _, q in qr.iterrows():
+                try:
+                    neto = float(q.get("NetoQR", 0.0) or 0.0)
+                except Exception:
+                    continue
+                diff = abs(neto - monto)
+                if diff < best_qr_diff and diff <= max(1.0, monto * 0.02):
+                    best_qr = q
+                    best_qr_diff = diff
+
+        best_trx = None
+        best_trx_diff = float("inf")
+        if trx is not None and not trx.empty and "MontoNeto" in trx.columns:
+            for _, t in trx.iterrows():
+                try:
+                    neto = float(t.get("MontoNeto", 0.0) or 0.0)
+                except Exception:
+                    continue
+                diff = abs(neto - monto)
+                if diff < best_trx_diff and diff <= max(1.0, monto * 0.02):
+                    best_trx = t
+                    best_trx_diff = diff
+
+        prefer_trx = ("TARJETA" in c or "CREDITO" in c or "CRÉDITO" in c or tipo == "PAV") and best_trx is not None
+        if prefer_trx or (best_trx is not None and (best_qr is None or best_trx_diff <= best_qr_diff)):
+            comercio = str(best_trx.get("COMERCIO", ""))
+            local = LOCAL_MAP.get(comercio, str(best_trx.get("Local", comercio)))
+            liq = str(best_trx.get("NUMERO LIQUIDACION", best_trx.get("Número Liquidación", "")))
+            comp = round(float(best_trx.get("MontoNeto", 0.0) or 0.0), 2)
+            return local, "", liq, comp, round(monto - comp, 2)
+
+        if best_qr is not None:
+            cod = str(best_qr.get("CodComercio", best_qr.get("Cód. comercio", "")))
+            local = LOCAL_MAP.get(cod, cod)
+            cupon = str(best_qr.get("Cupon", best_qr.get("Ticket", best_qr.get("Id QR", ""))))
+            comp = round(float(best_qr.get("NetoQR", 0.0) or 0.0), 2)
+            return local, cupon, "", comp, round(monto - comp, 2)
+
+        if "TARJETA" in c or "CREDITO" in c or "CRÉDITO" in c:
+            return "—", "", "No encontrado en TRX", "—", ""
+        return "—", "No encontrado en QR ni TRX", "", "—", ""
+
     # HOJA 1: Conciliacion semanal
     ws.cell(1, 1, "DANCONA ALIMENTOS - CONCILIACIÓN BANCARIA SEMANAL").font = title_f
     ws.merge_cells("A1:C1")
@@ -1408,7 +1492,9 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     if not cur_egr_b.empty:
         for cat, grp in cur_egr_b.groupby("Categoria"):
             label = CAT_LABELS.get(cat, cat)
-            dw(ws, rn, ["Banco egreso no Flexxus", "", label, len(grp), float(grp["ImporteAbs"].sum()), ""], mc=[5])
+            total_cat = float(grp["ImporteAbs"].sum())
+            obs = flexxus_copy_instruction(cat, total_cat, concepto=str(grp.iloc[0].get("Concepto", ""))) if cat in IMP_CATS else "Revisar según concepto antes de cargar"
+            dw(ws, rn, ["Banco egreso no Flexxus", "", label, len(grp), total_cat, obs], mc=[5])
             rn += 1
 
     if abs(float(res.get("prev_open_effect", 0.0))) > 0.005:
@@ -1417,7 +1503,12 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         rn += 1
         if not res["prev_open"].empty:
             for _, p in res["prev_open"].iterrows():
-                obs = "Arrastre individual abierto; no es ajuste genérico"
+                cat = str(p.get("Categoria", ""))
+                obs_base = "Arrastre individual abierto; no es ajuste genérico"
+                if str(p.get("Origen", "")) == "BANCO_NO_FLEXXUS" and float(p.get("SignoCalculo", 1)) < 0:
+                    obs = obs_base + " | " + flexxus_copy_instruction(cat, float(p.get("Monto", 0.0)), p.get("FechaOrigen", ""), p.get("Concepto", ""))
+                else:
+                    obs = obs_base
                 dw(ws, rn, ["Pendiente anterior abierto", p.get("FechaOrigen", ""), p.get("Concepto", ""), 1, float(p.get("Monto", 0.0)) * float(p.get("SignoCalculo", 1)), obs], mc=[5])
                 rn += 1
 
@@ -1437,8 +1528,9 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         for cat, grp in pbe.groupby("Categoria"):
             label = CAT_LABELS.get(cat, cat)
             concepto = str(grp.iloc[0].get("Concepto", cat)).split(" - ")[0]
-            trat = "Retención de Ingresos Brutos" if cat == "RETENCION_IIBB" else ("Anticipo Impuesto a las Ganancias" if "25413" in cat else ("IVA crédito fiscal / revisar" if cat == "IVA" else "Revisar según concepto"))
-            dw(ws_rb, rn, [concepto, label, trat, len(grp), float(grp["Monto"].sum()), "Banco egreso no Flexxus"], mc=[5])
+            total_cat = float(grp["Monto"].sum())
+            trat = flexxus_copy_instruction(cat, total_cat, concepto=concepto) if cat in IMP_CATS else "Revisar según concepto"
+            dw(ws_rb, rn, [concepto, label, trat, len(grp), total_cat, "Banco egreso no Flexxus"], mc=[5])
             rn += 1
     aw(ws_rb)
 
@@ -1449,7 +1541,8 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     rn = 3
     if not pf.empty:
         for _, p in pf.iterrows():
-            dw(ws3, rn, [p.get("FechaOrigen", ""), p.get("TipoMovimiento", ""), p.get("Numero", ""), p.get("Concepto", ""), float(p.get("Monto", 0.0)), "", "", "", "", ""], mc=[5, 9, 10])
+            local, cupon, liq, monto_comp, dif = enrich_flexxus_pending_row(p)
+            dw(ws3, rn, [p.get("FechaOrigen", ""), p.get("TipoMovimiento", ""), p.get("Numero", ""), p.get("Concepto", ""), float(p.get("Monto", 0.0)), local, cupon, liq, monto_comp, dif], mc=[5, 9, 10])
             rn += 1
     frz(ws3); aw(ws3)
 
@@ -1476,7 +1569,8 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             cat = p.get("Categoria", "")
             cuenta = CAT_LABELS.get(cat, cat)
             trat = "Retención de Ingresos Brutos" if cat == "RETENCION_IIBB" else ("Anticipo Impuesto a las Ganancias" if "25413" in cat else ("IVA crédito fiscal / revisar" if cat == "IVA" else "Revisar según concepto"))
-            dw(ws5, rn, ["Banco egreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cuenta, trat, float(p.get("Monto", 0.0)), "", "Registrar asiento / revisar según concepto"], mc=[7, 8])
+            accion = flexxus_copy_instruction(cat, float(p.get("Monto", 0.0)), p.get("FechaOrigen", ""), p.get("Concepto", "")) if cat in IMP_CATS else "Registrar asiento / revisar según concepto"
+            dw(ws5, rn, ["Banco egreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cuenta, trat, float(p.get("Monto", 0.0)), "", accion], mc=[7, 8])
             rn += 1
     frz(ws5); aw(ws5)
 
@@ -1579,7 +1673,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Local", "Locales: " + ", ".join([f"{k}={v}" for k, v in LOCAL_MAP.items()])),
         ("Pedidos Ya", "PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación."),
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
-        ("V4.2", "Corrige matching PAV/QR agregado y tolerancia 1:1 estricta para evitar que QR de regularización se asignen a PAV futuros. Mantiene saldo final Flexxus pasando conciliaciones = saldo Flexxus - C1 corriente."),
+        ("V4.7", "Completa columnas auxiliares en Flexxus no Banco y agrega instrucciones copiables para cargar impuestos/gastos en Flexxus con textos detectables en la próxima conciliación."),
     ]
     for i, (t, d) in enumerate(notas, 2):
         ws_n.cell(i, 1, t).font = bold_f
@@ -1628,7 +1722,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V4.6-INTEGRADA-HISTORIAL-ADMIN-ARCHIVOS-2026-04-29"
+APP_VERSION = "V4.7-INTEGRADA-FLEXXUS-NOBANCO-OBS-COPIAR-FLEXXUS-2026-04-29"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -1641,7 +1735,7 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V4.6</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V4.7</div>
       <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
@@ -1711,7 +1805,7 @@ def github_save_file(content_dict: dict, sha=None, filename: str = HISTORIAL_FIL
         return False, "GitHub no configurado. La conciliación se generó, pero no se guardó historial."
     url = f"https://api.github.com/repos/{repo}/contents/{filename}"
     encoded = base64.b64encode(json.dumps(content_dict, ensure_ascii=False, indent=2).encode("utf-8")).decode("utf-8")
-    body = {"message": f"Update {filename} - conciliacion V4.6", "content": encoded}
+    body = {"message": f"Update {filename} - conciliacion V4.7", "content": encoded}
     if sha:
         body["sha"] = sha
     try:
@@ -2051,9 +2145,9 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V4.6", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V4_6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V4.7", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V4_7.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V4_6.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V4_7.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
