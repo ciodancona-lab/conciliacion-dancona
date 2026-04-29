@@ -16,6 +16,7 @@ import json
 import base64
 import sys
 import traceback
+import unicodedata
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -38,7 +39,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V3",
+    page_title="Conciliación Bancaria Dancona · V4.6",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -77,6 +78,7 @@ CAT_LABELS = {
     "GASTO_BANCARIO": "Gasto bancario / comisión",
     "DEBITO_PAGO_DIRECTO": "Débito pago directo",
     "OTRO": "Otro",
+    "AJUSTE_MENOR_REDONDEO": "Ajuste menor redondeo/extracto",
 }
 
 # =============================================================================
@@ -107,9 +109,13 @@ def parse_ar_num(value) -> float:
 
 
 def norm_txt(x) -> str:
+    """Normaliza texto para matcheo: mayúsculas, sin acentos y espacios simples."""
     if pd.isna(x):
         return ""
-    return re.sub(r"\s+", " ", str(x).strip()).upper()
+    s = str(x).strip().upper()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", s)
 
 
 def safe_date(x) -> Optional[pd.Timestamp]:
@@ -530,29 +536,40 @@ def infer_pending_sign(origen: str, tipo_p: str, categoria: str, concepto: str, 
 
 
 def classify_mbext(movimiento: str) -> str:
-    """Clasifica una fila MB-EXT de Flexxus para matcheo agregado contra banco."""
+    """Clasifica una fila MB-EXT de Flexxus para matcheo agregado contra banco.
+
+    V4.4: normaliza acentos y puntos para reconocer textos como
+    "Ley 25.413 déb" y "Ley 25.413 cré".
+    """
     c = norm_txt(movimiento)
-    if "INGRESOS BRUTOS" in c or "IIBB" in c or "I.B." in c:
+    compact = re.sub(r"[^A-Z0-9]", "", c)
+    if "INGRESOSBRUTOS" in compact or "IIBB" in compact or "IB" == compact[:2] or "RETENCIONIIBB" in compact:
         return "RETENCION_IIBB"
-    if "25413" in c and ("DEB" in c or "DEBIT" in c):
-        return "IMPUESTO_LEY25413_DEB"
-    if "25413" in c and ("CRED" in c or "CREDIT" in c):
-        return "IMPUESTO_LEY25413_CRED"
-    if "I.V.A" in c or "IVA" in c:
+    if "25413" in compact:
+        if "DEB" in compact or "DEBIT" in compact:
+            return "IMPUESTO_LEY25413_DEB"
+        if "CRE" in compact or "CRED" in compact or "CREDIT" in compact:
+            return "IMPUESTO_LEY25413_CRED"
+    if "IVA" in compact:
         return "IVA"
-    if "COM TRANSFE" in c or "COM. TRANSFE" in c or "COMISION" in c or "COMISIÓN" in c:
+    if "COMTRANSFE" in compact or "COMISION" in compact or "COMBANC" in compact:
         return "GASTO_BANCARIO"
-    if "DEB LIQ" in c or "DEB.LIQ" in c or "LIQ MASTER" in c or "MASTERCARD" in c:
+    if "DEBLIQ" in compact or "LIQMASTER" in compact or "MASTERCARD" in compact:
         return "DEBITO_LIQ_TARJETA"
-    if "PAGO DIRECTO" in c:
+    if "PAGODIRECTO" in compact:
         return "DEBITO_PAGO_DIRECTO"
     return "OTRO_MBEXT"
-
 
 def amount_close(a: float, b: float, base_tol: float = 2.0, rel_tol: float = 0.00002) -> bool:
     """Tolerancia mixta: mínimo fijo + margen proporcional para grandes montos."""
     a = abs(float(a)); b = abs(float(b))
     return abs(a - b) <= max(base_tol, max(a, b) * rel_tol)
+
+
+def amount_exact(a: float, b: float, tol: float = 0.05) -> bool:
+    """Match 1:1 estricto. Evita compensar QR/tarjetas con diferencias de centavos o importes casi iguales."""
+    a = abs(float(a)); b = abs(float(b))
+    return abs(a - b) <= tol
 
 
 def get_saldo_banco_final(bank: pd.DataFrame) -> float:
@@ -568,17 +585,26 @@ def get_saldo_banco_final(bank: pd.DataFrame) -> float:
 
 
 def get_saldo_banco_apertura(bank: pd.DataFrame) -> float:
-    """Saldo inmediatamente anterior al primer movimiento cronológico del archivo."""
+    """Saldo de apertura del extracto actual.
+
+    En Banco Nación el extracto suele venir en orden descendente y, cuando todos
+    los movimientos son del mismo día, SourceOrder no permite reconstruir la
+    primera operación cronológica. Por eso la apertura más robusta para control
+    de continuidad es:
+        saldo final del extracto - suma neta de movimientos del extracto.
+    """
     if bank.empty:
         return 0.0
-    tmp = bank.copy()
-    tmp = tmp[pd.notna(tmp["Fecha_dt"])]
-    if tmp.empty:
-        return 0.0
-    sort_cols = ["Fecha_dt"] + (["SourceOrder"] if "SourceOrder" in tmp.columns else ["row_id"])
-    first = tmp.sort_values(sort_cols).iloc[0]
-    return float(first["SaldoNum"]) - float(first["ImporteNum"])
-
+    try:
+        return round(float(get_saldo_banco_final(bank)) - float(bank["ImporteNum"].sum()), 2)
+    except Exception:
+        tmp = bank.copy()
+        tmp = tmp[pd.notna(tmp["Fecha_dt"])]
+        if tmp.empty:
+            return 0.0
+        sort_cols = ["Fecha_dt"] + (["SourceOrder"] if "SourceOrder" in tmp.columns else ["row_id"])
+        first = tmp.sort_values(sort_cols).iloc[0]
+        return round(float(first["SaldoNum"]) - float(first["ImporteNum"]), 2)
 
 def build_continuity_control(prev_summary: Dict[str, float], bank: pd.DataFrame) -> Dict:
     """Controla continuidad banco vs banco, no banco anterior vs Flexxus actual."""
@@ -587,13 +613,18 @@ def build_continuity_control(prev_summary: Dict[str, float], bank: pd.DataFrame)
     if not prev_bank:
         return {"aplica": False, "mensaje": "Sin saldo banco anterior leído para validar continuidad."}
     diff = round(opening - prev_bank, 2)
+    ok = abs(diff) <= 5.0
     return {
         "aplica": True,
         "saldo_banco_cierre_anterior": prev_bank,
         "saldo_banco_apertura_actual": opening,
         "diferencia_continuidad_banco": diff,
-        "ok": abs(diff) < 1.0,
-        "mensaje": "OK: apertura bancaria actual coincide con cierre anterior." if abs(diff) < 1.0 else "Revisar: la apertura bancaria actual no coincide con el cierre anterior. Puede faltar un movimiento o el rango del extracto no es consecutivo.",
+        "ok": ok,
+        "mensaje": (
+            "OK: apertura bancaria actual coincide con cierre anterior dentro de tolerancia operativa."
+            if ok else
+            "Revisar: la apertura bancaria actual no coincide con el cierre anterior. Puede faltar un movimiento o el rango del extracto no es consecutivo."
+        ),
     }
 
 # =============================================================================
@@ -675,7 +706,13 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
                 candidates = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"] == "PAV")].copy()
             else:
                 candidates = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"].isin(["MB-EXT", "MB-ENT-EX"]))].copy()
-            candidates = candidates[candidates["MontoFlexxus"].apply(lambda x: amount_close(x, monto))]
+            # V4.4: si el pendiente anterior era un ingreso bancario que ahora
+            # aparece como PAV, el match debe ser estricto. Evita cancelar QR
+            # anteriores contra PAV actuales con diferencias chicas (ej. 0,24).
+            if signo > 0:
+                candidates = candidates[candidates["MontoFlexxus"].apply(lambda x: amount_exact(x, monto, tol=0.05))]
+            else:
+                candidates = candidates[candidates["MontoFlexxus"].apply(lambda x: amount_close(x, monto))]
             if not candidates.empty:
                 candidates["date_diff"] = (candidates["FechaFlexxus_dt"] - safe_date(p.get("FechaOrigen", ""))).abs()
                 best_idx = candidates.sort_values(["date_diff", "row_id"]).index[0]
@@ -696,7 +733,7 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & (bank["EsIngreso"])].copy()
             else:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & (bank["EsEgreso"])].copy()
-            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_close(x, monto))]
+            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_exact(x, monto))]
             if not candidates.empty:
                 comp = candidates[candidates["Categoria"].apply(lambda c: category_compatible(cat, c, origen))]
                 if comp.empty:
@@ -813,10 +850,139 @@ def match_mbext_current_aggregated(flex: pd.DataFrame, bank: pd.DataFrame) -> Tu
     return flex, bank, pd.DataFrame(rows)
 
 
+def match_pav_qr_current_aggregated(flex: pd.DataFrame, bank: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Matchea un PAV consolidado contra N QR bancarios del mismo día.
+
+    Caso Dancona: Flexxus puede traer un PAV grande de regularización QR del período
+    anterior, mientras Banco Nación muestra muchos CR DEBIN SPOT individuales.
+    Se ejecuta después del match 1:1 estricto para que solo sume QR remanentes.
+    """
+    rows = []
+    flex_candidates = flex[
+        (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
+        (flex["Tipo"] == "PAV") &
+        (~flex["EsPedidosYa"])
+    ].copy()
+    if flex_candidates.empty:
+        return flex, bank, pd.DataFrame(rows)
+
+    bank_qr = bank[
+        (~bank["Matched"]) & (~bank["ConsumedPrev"]) &
+        (bank["EsIngreso"]) & (bank["Categoria"] == "QR")
+    ].copy()
+    if bank_qr.empty:
+        return flex, bank, pd.DataFrame(rows)
+
+    for fecha_b, grp in bank_qr.groupby("Fecha"):
+        if grp.empty or len(grp) < 2:
+            continue
+        total = float(grp["ImporteAbs"].sum())
+        if total <= 0:
+            continue
+        same_day = flex_candidates[
+            (~flex_candidates.index.isin([r.get("flex_index") for r in rows if "flex_index" in r])) &
+            (flex_candidates["FechaFlexxus"] == fecha_b) &
+            (flex_candidates["MontoFlexxus"].apply(lambda x: amount_close(x, total, base_tol=5.0, rel_tol=0.00005)))
+        ].copy()
+        if same_day.empty:
+            continue
+        same_day["monto_diff"] = same_day["MontoFlexxus"].apply(lambda x: abs(float(x) - total))
+        fidx = same_day.sort_values(["monto_diff", "row_id"]).index[0]
+        monto = float(flex.loc[fidx, "MontoFlexxus"])
+
+        flex.loc[fidx, "Matched"] = True
+        flex.loc[fidx, "MatchStage"] = "CORRIENTE_AGREGADO_QR"
+        flex.loc[fidx, "MatchRef"] = ",".join(grp["row_id"].astype(str).tolist())
+        flex.loc[fidx, "BancoFecha"] = fecha_b
+        flex.loc[fidx, "BancoConcepto"] = "Regularización QR período anterior (acumulado)"
+        flex.loc[fidx, "BancoComprobante"] = "AGREGADO_QR"
+        flex.loc[fidx, "FechaAcreditacionUsada"] = flex.loc[fidx, "FechaFlexxus"]
+        flex.loc[fidx, "Diagnostico"] = f"OK - PAV QR agregado contra {len(grp)} CR DEBIN SPOT"
+
+        bank.loc[grp.index, "Matched"] = True
+        bank.loc[grp.index, "MatchStage"] = "CORRIENTE_AGREGADO_QR"
+        bank.loc[grp.index, "MatchRef"] = flex.loc[fidx, "row_id"]
+        bank.loc[grp.index, "FlexxusNumero"] = flex.loc[fidx, "Numero"]
+        bank.loc[grp.index, "Diagnostico"] = f"Incluido en PAV QR agregado {flex.loc[fidx, 'Numero']}"
+
+        rows.append({
+            "flex_index": fidx,
+            "Fecha Flexxus": flex.loc[fidx, "FechaFlexxus"],
+            "Número Flexxus": flex.loc[fidx, "Numero"],
+            "Categoría": "QR",
+            "Concepto Flexxus": flex.loc[fidx, "Movimiento"],
+            "Monto Flexxus": monto,
+            "Cantidad líneas banco": len(grp),
+            "Total banco": total,
+            "Diferencia": round(monto - total, 2),
+            "Diagnóstico": "OK agregado PAV/QR",
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty and "flex_index" in out.columns:
+        out = out.drop(columns=["flex_index"])
+    return flex, bank, out
+
+
+
+def match_pedidosya_current(flex: pd.DataFrame, bank: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Match especial Pedidos Ya contra transferencia entrante bancaria.
+
+    Pedidos Ya no es QR ni tarjeta, pero puede acreditarse como transferencia
+    entrante con diferencia menor por redondeo. V4.4 permite hasta $1,00 y
+    deja diagnóstico explícito sin cupón QR ni número de liquidación.
+    """
+    rows = []
+    flex_idx = flex[
+        (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
+        (flex["Tipo"] == "PAV") & (flex["EsPedidosYa"])
+    ].index.tolist()
+    for fidx in flex_idx:
+        monto = float(flex.loc[fidx, "MontoFlexxus"])
+        fecha_f = flex.loc[fidx, "FechaFlexxus_dt"]
+        candidates = bank[
+            (~bank["Matched"]) & (~bank["ConsumedPrev"]) &
+            (bank["EsIngreso"]) & (bank["Categoria"] == "TRANSFERENCIA_ENTRANTE") &
+            (bank["ImporteAbs"].apply(lambda x: abs(float(x) - monto) <= 1.00))
+        ].copy()
+        if candidates.empty:
+            continue
+        candidates["date_diff"] = (candidates["Fecha_dt"] - fecha_f).abs()
+        bidx = candidates.sort_values(["date_diff", "row_id"]).index[0]
+        diff = round(float(bank.loc[bidx, "ImporteAbs"]) - monto, 2)
+        flex.loc[fidx, "Matched"] = True
+        flex.loc[fidx, "MatchStage"] = "CORRIENTE_PEDIDOSYA"
+        flex.loc[fidx, "MatchRef"] = bank.loc[bidx, "row_id"]
+        flex.loc[fidx, "BancoFecha"] = bank.loc[bidx, "Fecha"]
+        flex.loc[fidx, "BancoConcepto"] = bank.loc[bidx, "Concepto"]
+        flex.loc[fidx, "BancoComprobante"] = bank.loc[bidx, "Comprobante"]
+        flex.loc[fidx, "FechaAcreditacionUsada"] = bank.loc[bidx, "Fecha"] if bank.loc[bidx, "Fecha_dt"] >= fecha_f else flex.loc[fidx, "FechaFlexxus"]
+        flex.loc[fidx, "Diagnostico"] = f"OK - Pedidos Ya contra transferencia entrante; diferencia redondeo {diff:.2f}. No QR/no tarjeta"
+        bank.loc[bidx, "Matched"] = True
+        bank.loc[bidx, "MatchStage"] = "CORRIENTE_PEDIDOSYA"
+        bank.loc[bidx, "MatchRef"] = flex.loc[fidx, "row_id"]
+        bank.loc[bidx, "FlexxusNumero"] = flex.loc[fidx, "Numero"]
+        bank.loc[bidx, "Diagnostico"] = f"Incluido en PAV Pedidos Ya {flex.loc[fidx, 'Numero']}; diferencia {diff:.2f}"
+        rows.append({
+            "Fecha Flexxus": flex.loc[fidx, "FechaFlexxus"],
+            "Número Flexxus": flex.loc[fidx, "Numero"],
+            "Categoría": "PEDIDOS_YA",
+            "Concepto Flexxus": flex.loc[fidx, "Movimiento"],
+            "Monto Flexxus": monto,
+            "Fecha banco": bank.loc[bidx, "Fecha"],
+            "Concepto banco": bank.loc[bidx, "Concepto"],
+            "Importe banco": float(bank.loc[bidx, "ImporteAbs"]),
+            "Diferencia": diff,
+            "Diagnóstico": "OK Pedidos Ya / transferencia entrante",
+        })
+    return flex, bank, pd.DataFrame(rows)
+
 def match_current(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Matchea movimientos corrientes Flexxus vs banco, sin tocar regularizaciones anteriores."""
     flex, bank, mbext_ag = match_mbext_current_aggregated(flex, bank)
     flex.attrs["mbext_agregado"] = mbext_ag
+    flex, bank, pedidosya_ag = match_pedidosya_current(flex, bank)
+    flex.attrs["pedidosya_agregado"] = pedidosya_ag
+    flex.attrs["pav_qr_agregado"] = pd.DataFrame()
     # Lookups auxiliares
     qr_lookup = {}
     if not qr.empty and "NetoQR" in qr.columns:
@@ -836,7 +1002,7 @@ def match_current(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & bank["EsIngreso"]].copy()
             else:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & bank["EsEgreso"]].copy()
-            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_close(x, monto))]
+            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_exact(x, monto))]
             if candidates.empty:
                 continue
             candidates["date_diff"] = (candidates["Fecha_dt"] - fecha_f).abs()
@@ -863,6 +1029,8 @@ def match_current(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx:
             bank.loc[bidx, "Diagnostico"] = "OK corriente - match exacto por importe"
 
     do_match("PAV", "INGRESO")
+    flex, bank, pav_qr_ag = match_pav_qr_current_aggregated(flex, bank)
+    flex.attrs["pav_qr_agregado"] = pav_qr_ag
     do_match("MB-ENT-EX", "EGRESO")
     do_match("MB-EXT", "EGRESO")
 
@@ -905,6 +1073,39 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
 
     calc = saldo_f - C1 + C2 + C3 - C4 + prev_open_effect
     diff = round(saldo_b - calc, 2)
+
+    ajuste_menor = 0.0
+    if abs(diff) > 0.005 and abs(diff) <= 5.0:
+        ajuste_menor = float(diff)
+        fecha_aj = fmt_date(bank["Fecha_dt"].max()) if not bank.empty and "Fecha_dt" in bank.columns else ""
+        ajuste_row = {
+            "row_id": f"AJ-{uuid.uuid4().hex[:10]}",
+            "SourceOrder": 999999,
+            "Fecha": fecha_aj,
+            "Fecha_dt": safe_date(fecha_aj),
+            "Comprobante": "AJUSTE_MENOR",
+            "Concepto": "Diferencia menor de redondeo/extracto para cierre auditado",
+            "ConceptoNorm": "DIFERENCIA MENOR REDONDEO EXTRACTO",
+            "ImporteNum": abs(ajuste_menor) if ajuste_menor > 0 else -abs(ajuste_menor),
+            "ImporteAbs": abs(ajuste_menor),
+            "SaldoNum": saldo_b,
+            "EsIngreso": ajuste_menor > 0,
+            "EsEgreso": ajuste_menor < 0,
+            "Categoria": "AJUSTE_MENOR_REDONDEO",
+            "Matched": False,
+            "ConsumedPrev": False,
+            "MatchStage": "AJUSTE_MENOR",
+            "MatchRef": "",
+            "FlexxusNumero": "",
+            "Diagnostico": "Ajuste técnico menor <= $5 para igualar extracto; revisar si el banco oculta/agrupa centavos",
+        }
+        current_unmatched_b = pd.concat([current_unmatched_b, pd.DataFrame([ajuste_row])], ignore_index=True)
+        if ajuste_menor > 0:
+            C3 += abs(ajuste_menor)
+        else:
+            C4 += abs(ajuste_menor)
+        calc = saldo_f - C1 + C2 + C3 - C4 + prev_open_effect
+        diff = round(saldo_b - calc, 2)
 
     # Generar pendientes abiertos para próxima conciliación: anteriores no regularizados + nuevos corrientes.
     next_pendings = []
@@ -966,6 +1167,7 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
         "prev_open": prev_open.copy() if not prev_open.empty else pd.DataFrame(),
         "regularizaciones": regs.copy() if regs is not None else pd.DataFrame(),
         "mbext_agregado": flex.attrs.get("mbext_agregado", pd.DataFrame()),
+        "pav_qr_agregado": flex.attrs.get("pav_qr_agregado", pd.DataFrame()),
         "continuity": continuity,
         "pendientes_proxima": pend_next,
         "matched_flex": flex[flex["Matched"]].copy(),
@@ -1293,6 +1495,11 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         for _, a in ag.iterrows():
             dw(ws_reg, rn, ["MB-EXT agregado contra banco", a.get("Fecha Flexxus", ""), "MB-EXT", a.get("Número Flexxus", ""), a.get("Concepto Flexxus", ""), a.get("Cantidad líneas banco", ""), float(a.get("Monto Flexxus", 0.0)), a.get("Diagnóstico", "")], mc=[7])
             rn += 1
+    pav_ag = res.get("pav_qr_agregado", pd.DataFrame())
+    if pav_ag is not None and not pav_ag.empty:
+        for _, a in pav_ag.iterrows():
+            dw(ws_reg, rn, ["PAV QR agregado contra banco", a.get("Fecha Flexxus", ""), "PAV", a.get("Número Flexxus", ""), a.get("Concepto Flexxus", ""), a.get("Cantidad líneas banco", ""), float(a.get("Monto Flexxus", 0.0)), a.get("Diagnóstico", "")], mc=[7])
+            rn += 1
     if rn == 3:
         ws_reg.cell(3, 1, "Sin regularizaciones en este período").font = norm
     aw(ws_reg)
@@ -1372,7 +1579,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Local", "Locales: " + ", ".join([f"{k}={v}" for k, v in LOCAL_MAP.items()])),
         ("Pedidos Ya", "PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación."),
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
-        ("V4.1", "Se conserva el formato de exportación de la plantilla: mismas hojas y mismos encabezados. La conciliación continua queda reflejada como pendientes abiertos individuales, no como ajuste genérico."),
+        ("V4.2", "Corrige matching PAV/QR agregado y tolerancia 1:1 estricta para evitar que QR de regularización se asignen a PAV futuros. Mantiene saldo final Flexxus pasando conciliaciones = saldo Flexxus - C1 corriente."),
     ]
     for i, (t, d) in enumerate(notas, 2):
         ws_n.cell(i, 1, t).font = bold_f
@@ -1421,7 +1628,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V4.1-INTEGRADA-FORMATO-PLANTILLA-QR-FIX-2026-04-29"
+APP_VERSION = "V4.6-INTEGRADA-HISTORIAL-ADMIN-ARCHIVOS-2026-04-29"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -1434,8 +1641,8 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V4.1</div>
-      <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V4.6</div>
+      <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1472,15 +1679,22 @@ def reset_app_state():
     except Exception:
         pass
 
-def github_get_file(filename: str = HISTORIAL_FILE):
+def github_headers():
+    token = secret_get("GITHUB_TOKEN", "")
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+def github_repo_ready():
     token = secret_get("GITHUB_TOKEN", "")
     repo = secret_get("GITHUB_REPO", "")
-    if not token or not repo or requests is None:
+    return bool(token and repo and requests is not None), repo
+
+def github_get_file(filename: str = HISTORIAL_FILE):
+    ready, repo = github_repo_ready()
+    if not ready:
         return None, None, "GitHub no configurado o requests no disponible"
     url = f"https://api.github.com/repos/{repo}/contents/{filename}"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     try:
-        r = requests.get(url, headers=headers, timeout=15)
+        r = requests.get(url, headers=github_headers(), timeout=15)
         if r.status_code == 200:
             data = r.json()
             content = json.loads(base64.b64decode(data["content"]).decode("utf-8"))
@@ -1492,31 +1706,103 @@ def github_get_file(filename: str = HISTORIAL_FILE):
         return None, None, f"Error leyendo GitHub: {e}"
 
 def github_save_file(content_dict: dict, sha=None, filename: str = HISTORIAL_FILE):
-    token = secret_get("GITHUB_TOKEN", "")
-    repo = secret_get("GITHUB_REPO", "")
-    if not token or not repo or requests is None:
+    ready, repo = github_repo_ready()
+    if not ready:
         return False, "GitHub no configurado. La conciliación se generó, pero no se guardó historial."
     url = f"https://api.github.com/repos/{repo}/contents/{filename}"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     encoded = base64.b64encode(json.dumps(content_dict, ensure_ascii=False, indent=2).encode("utf-8")).decode("utf-8")
-    body = {"message": f"Update {filename} - conciliacion V4", "content": encoded}
+    body = {"message": f"Update {filename} - conciliacion V4.6", "content": encoded}
     if sha:
         body["sha"] = sha
     try:
-        r = requests.put(url, headers=headers, json=body, timeout=20)
+        r = requests.put(url, headers=github_headers(), json=body, timeout=20)
         if r.status_code in (200, 201):
             return True, "Historial guardado en GitHub."
         return False, f"GitHub HTTP {r.status_code}: {r.text[:300]}"
     except Exception as e:
         return False, f"Error guardando GitHub: {e}"
 
-def guardar_resumen_historial(res: Dict, mode: str):
+def github_get_content_meta(path: str):
+    ready, repo = github_repo_ready()
+    if not ready:
+        return None, "GitHub no configurado"
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    try:
+        r = requests.get(url, headers=github_headers(), timeout=20)
+        if r.status_code == 200:
+            return r.json(), "OK"
+        if r.status_code == 404:
+            return None, "No existe"
+        return None, f"GitHub HTTP {r.status_code}: {r.text[:250]}"
+    except Exception as e:
+        return None, f"Error leyendo {path}: {e}"
+
+def github_save_bytes(path: str, data: bytes, message: str):
+    ready, repo = github_repo_ready()
+    if not ready:
+        return False, "GitHub no configurado"
+    meta, _ = github_get_content_meta(path)
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    body = {"message": message, "content": base64.b64encode(data).decode("utf-8")}
+    if meta and meta.get("sha"):
+        body["sha"] = meta["sha"]
+    try:
+        r = requests.put(url, headers=github_headers(), json=body, timeout=30)
+        if r.status_code in (200, 201):
+            return True, "OK"
+        return False, f"GitHub HTTP {r.status_code}: {r.text[:300]}"
+    except Exception as e:
+        return False, f"Error guardando archivo {path}: {e}"
+
+def github_get_bytes(path: str):
+    meta, msg = github_get_content_meta(path)
+    if not meta:
+        return None, msg
+    try:
+        return base64.b64decode(meta["content"]), "OK"
+    except Exception as e:
+        return None, f"Error decodificando {path}: {e}"
+
+def github_delete_file(path: str, message: str):
+    ready, repo = github_repo_ready()
+    if not ready:
+        return False, "GitHub no configurado"
+    meta, msg = github_get_content_meta(path)
+    if not meta:
+        return True, f"Archivo no encontrado, se considera eliminado: {path}"
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    body = {"message": message, "sha": meta.get("sha")}
+    try:
+        r = requests.delete(url, headers=github_headers(), json=body, timeout=20)
+        if r.status_code == 200:
+            return True, "OK"
+        return False, f"GitHub HTTP {r.status_code}: {r.text[:300]}"
+    except Exception as e:
+        return False, f"Error eliminando {path}: {e}"
+
+def guardar_resumen_historial(res: Dict, mode: str, xlsx_bytes: bytes = None, xls_bytes: bytes = None):
     hist, sha, msg = github_get_file()
     if hist is None:
         return False, msg
     hist.setdefault("semanas", [])
+    item_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archivos = []
+    if xlsx_bytes:
+        path_xlsx = f"historial/{item_id}/Conciliacion_Semanal_Dancona_{item_id}.xlsx"
+        ok_file, msg_file = github_save_bytes(path_xlsx, xlsx_bytes, f"Guardar conciliación Excel {item_id}")
+        if ok_file:
+            archivos.append({"tipo": "conciliacion_xlsx", "nombre": f"Conciliacion_Semanal_Dancona_{item_id}.xlsx", "path": path_xlsx, "bytes": len(xlsx_bytes)})
+        else:
+            archivos.append({"tipo": "error_guardado_xlsx", "nombre": "ERROR", "path": path_xlsx, "error": msg_file})
+    if xls_bytes:
+        path_xls = f"historial/{item_id}/ASIENTOS_FLEXXUS_{item_id}.xls"
+        ok_file, msg_file = github_save_bytes(path_xls, xls_bytes, f"Guardar import Flexxus {item_id}")
+        if ok_file:
+            archivos.append({"tipo": "import_flexxus_xls", "nombre": f"ASIENTOS_FLEXXUS_{item_id}.xls", "path": path_xls, "bytes": len(xls_bytes)})
+        else:
+            archivos.append({"tipo": "error_guardado_xls", "nombre": "ERROR", "path": path_xls, "error": msg_file})
     item = {
-        "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "id": item_id,
         "fecha_proceso": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         "version_app": APP_VERSION,
         "modo": mode,
@@ -1532,16 +1818,44 @@ def guardar_resumen_historial(res: Dict, mode: str):
         "regularizaciones_anteriores": int(len(res.get("regularizaciones", pd.DataFrame()))),
         "pendientes_proxima": int(len(res.get("pendientes_proxima", pd.DataFrame()))),
         "mbext_agregados": int(len(res.get("mbext_agregado", pd.DataFrame()))),
+        "archivos": archivos,
+        "eliminado": False,
     }
     hist["semanas"].append(item)
-    return github_save_file(hist, sha)
+    ok, save_msg = github_save_file(hist, sha)
+    if not ok:
+        return False, save_msg
+    if any(str(a.get("tipo", "")).startswith("error_guardado") for a in archivos):
+        return True, "Resumen guardado, pero hubo errores guardando uno o más archivos. Revisá el historial."
+    return True, "Historial y archivos guardados en GitHub."
+
+def eliminar_item_historial(item_id: str, borrar_archivos: bool = True):
+    hist, sha, msg = github_get_file()
+    if hist is None:
+        return False, msg
+    semanas = hist.get("semanas", [])
+    item = next((x for x in semanas if str(x.get("id")) == str(item_id)), None)
+    if not item:
+        return False, "No encontré ese registro en historico.json."
+    if borrar_archivos:
+        for a in item.get("archivos", []):
+            path = a.get("path")
+            if path:
+                ok_del, msg_del = github_delete_file(path, f"Eliminar archivo historial {item_id}: {path}")
+                if not ok_del:
+                    return False, "No se pudo eliminar un archivo: " + msg_del
+    hist["semanas"] = [x for x in semanas if str(x.get("id")) != str(item_id)]
+    ok, save_msg = github_save_file(hist, sha)
+    if not ok:
+        return False, save_msg
+    return True, "Registro eliminado del historial" + (" y archivos eliminados." if borrar_archivos else ".")
 
 def render_historial_tab():
     st.subheader("📊 Historial")
     hist, sha, msg = github_get_file()
     if hist is None:
         st.warning(msg)
-        st.info("La app puede conciliar igual. Para guardar historial configurá GITHUB_TOKEN y GITHUB_REPO en Secrets.")
+        st.info("La app puede conciliar igual. Para guardar historial con archivos configurá GITHUB_TOKEN y GITHUB_REPO en Secrets.")
         return
     semanas = hist.get("semanas", [])
     if not semanas:
@@ -1551,8 +1865,51 @@ def render_historial_tab():
     df = pd.DataFrame(semanas)
     if "fecha_proceso" in df.columns:
         df = df.sort_values("fecha_proceso", ascending=False)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    display_cols = [c for c in ["id", "fecha_proceso", "version_app", "modo", "saldo_flexxus", "saldo_banco", "banco_calculado", "diferencia", "pendientes_proxima", "regularizaciones_anteriores", "mbext_agregados"] if c in df.columns]
+    st.dataframe(df[display_cols] if display_cols else df, use_container_width=True, hide_index=True)
     st.download_button("Descargar historico.json", data=json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8"), file_name="historico.json", mime="application/json", use_container_width=True)
+
+    ids = [str(x.get("id")) for x in semanas if x.get("id")]
+    if not ids:
+        return
+    st.markdown("---")
+    st.subheader("🗂️ Archivos del historial")
+    selected_id = st.selectbox("Seleccionar conciliación", options=ids, index=len(ids)-1 if ids else 0)
+    selected = next((x for x in semanas if str(x.get("id")) == str(selected_id)), None)
+    if selected:
+        st.json({k: v for k, v in selected.items() if k != "archivos"})
+        archivos = selected.get("archivos", [])
+        if archivos:
+            st.write("Archivos guardados")
+            st.dataframe(pd.DataFrame(archivos), use_container_width=True, hide_index=True)
+            for a in archivos:
+                path = a.get("path", "")
+                nombre = a.get("nombre", path.split("/")[-1])
+                tipo = a.get("tipo", "archivo")
+                if path and not str(tipo).startswith("error"):
+                    data, msg_b = github_get_bytes(path)
+                    if data:
+                        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if nombre.lower().endswith(".xlsx") else "application/vnd.ms-excel"
+                        st.download_button(f"Descargar {nombre}", data=data, file_name=nombre, mime=mime, use_container_width=True, key=f"dl_{selected_id}_{path}")
+                    else:
+                        st.warning(f"No pude leer {path}: {msg_b}")
+        else:
+            st.info("Este registro no tiene archivos asociados. Probablemente fue guardado con una versión anterior del historial.")
+
+    with st.expander("🛡️ Administrador del historial"):
+        st.warning("Eliminar borra el registro del historico.json y, si existen, los archivos Excel/XLS guardados en GitHub para esa conciliación. No borra archivos locales de tu computadora.")
+        confirm_txt = st.text_input("Para eliminar, escribí ELIMINAR", key="confirm_delete_hist")
+        borrar_archivos = st.checkbox("Eliminar también archivos asociados", value=True)
+        if st.button("Eliminar conciliación seleccionada", type="secondary", use_container_width=True):
+            if confirm_txt.strip().upper() != "ELIMINAR":
+                st.error("No se eliminó. Tenés que escribir ELIMINAR.")
+            else:
+                ok, del_msg = eliminar_item_historial(selected_id, borrar_archivos=borrar_archivos)
+                if ok:
+                    st.success(del_msg)
+                    st.rerun()
+                else:
+                    st.error(del_msg)
 
 def render_diagnostico_tab():
     st.subheader("🧪 Diagnóstico técnico")
@@ -1694,12 +2051,12 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V4.1", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V4_1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V4.6", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V4_6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V4_1.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V4_6.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
-        ok, msg = guardar_resumen_historial(res, res.get("mode", ""))
+        ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
         if ok:
             st.success(msg)
         else:
