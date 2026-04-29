@@ -1,5 +1,5 @@
 # app_conciliacion_dancona_v2.py
-# Versión estable: conciliación continua con pendientes anteriores, regularizaciones y apertura.
+# Versión estable V3: conciliación continua, pendientes anteriores, regularizaciones, apertura y matching agregado MB-EXT.
 # Streamlit Cloud requirements sugeridos:
 # streamlit
 # pandas
@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V2",
+    page_title="Conciliación Bancaria Dancona · V3",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -244,12 +244,13 @@ def parse_banco(file) -> pd.DataFrame:
     raw = raw.dropna(subset=["Fecha", "Concepto"])
     raw = raw[raw["Fecha"].astype(str).str.strip().ne("")]
     rows = []
-    for _, r in raw.iterrows():
+    for source_order, (_, r) in enumerate(raw.iterrows()):
         imp = parse_ar_num(r["Importe"])
         if abs(imp) <= 0.005:
             continue
         rows.append({
             "row_id": f"B-{uuid.uuid4().hex[:10]}",
+            "SourceOrder": source_order,
             "Fecha": str(r["Fecha"]).strip(),
             "Fecha_dt": safe_date(r["Fecha"]),
             "Comprobante": str(r["Comprobante"]).strip() if pd.notna(r["Comprobante"]) else "",
@@ -271,7 +272,7 @@ def parse_banco(file) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     if out.empty:
         raise ValueError("No se encontraron movimientos bancarios válidos.")
-    return out.sort_values(["Fecha_dt", "row_id"]).reset_index(drop=True)
+    return out.reset_index(drop=True)
 
 
 def parse_qr(file) -> pd.DataFrame:
@@ -500,14 +501,83 @@ def infer_pending_sign(origen: str, tipo_p: str, categoria: str, concepto: str, 
         return -1
     return 1 if monto >= 0 else -1
 
+
+def classify_mbext(movimiento: str) -> str:
+    """Clasifica una fila MB-EXT de Flexxus para matcheo agregado contra banco."""
+    c = norm_txt(movimiento)
+    if "INGRESOS BRUTOS" in c or "IIBB" in c or "I.B." in c:
+        return "RETENCION_IIBB"
+    if "25413" in c and ("DEB" in c or "DEBIT" in c):
+        return "IMPUESTO_LEY25413_DEB"
+    if "25413" in c and ("CRED" in c or "CREDIT" in c):
+        return "IMPUESTO_LEY25413_CRED"
+    if "I.V.A" in c or "IVA" in c:
+        return "IVA"
+    if "COM TRANSFE" in c or "COM. TRANSFE" in c or "COMISION" in c or "COMISIÓN" in c:
+        return "GASTO_BANCARIO"
+    if "DEB LIQ" in c or "DEB.LIQ" in c or "LIQ MASTER" in c or "MASTERCARD" in c:
+        return "DEBITO_LIQ_TARJETA"
+    if "PAGO DIRECTO" in c:
+        return "DEBITO_PAGO_DIRECTO"
+    return "OTRO_MBEXT"
+
+
+def amount_close(a: float, b: float, base_tol: float = 2.0, rel_tol: float = 0.00002) -> bool:
+    """Tolerancia mixta: mínimo fijo + margen proporcional para grandes montos."""
+    a = abs(float(a)); b = abs(float(b))
+    return abs(a - b) <= max(base_tol, max(a, b) * rel_tol)
+
+
+def get_saldo_banco_final(bank: pd.DataFrame) -> float:
+    """Obtiene saldo final del extracto sin depender de bank.iloc[0]."""
+    if bank.empty:
+        return 0.0
+    ordered = bank.sort_values("SourceOrder") if "SourceOrder" in bank.columns else bank.copy()
+    first_date = ordered.iloc[0]["Fecha_dt"]
+    last_date = ordered.iloc[-1]["Fecha_dt"]
+    if pd.notna(first_date) and pd.notna(last_date) and first_date >= last_date:
+        return float(ordered.iloc[0]["SaldoNum"])
+    return float(ordered.iloc[-1]["SaldoNum"])
+
+
+def get_saldo_banco_apertura(bank: pd.DataFrame) -> float:
+    """Saldo inmediatamente anterior al primer movimiento cronológico del archivo."""
+    if bank.empty:
+        return 0.0
+    tmp = bank.copy()
+    tmp = tmp[pd.notna(tmp["Fecha_dt"])]
+    if tmp.empty:
+        return 0.0
+    sort_cols = ["Fecha_dt"] + (["SourceOrder"] if "SourceOrder" in tmp.columns else ["row_id"])
+    first = tmp.sort_values(sort_cols).iloc[0]
+    return float(first["SaldoNum"]) - float(first["ImporteNum"])
+
+
+def build_continuity_control(prev_summary: Dict[str, float], bank: pd.DataFrame) -> Dict:
+    """Controla continuidad banco vs banco, no banco anterior vs Flexxus actual."""
+    prev_bank = float(prev_summary.get("saldo_banco_anterior", 0) or 0)
+    opening = get_saldo_banco_apertura(bank)
+    if not prev_bank:
+        return {"aplica": False, "mensaje": "Sin saldo banco anterior leído para validar continuidad."}
+    diff = round(opening - prev_bank, 2)
+    return {
+        "aplica": True,
+        "saldo_banco_cierre_anterior": prev_bank,
+        "saldo_banco_apertura_actual": opening,
+        "diferencia_continuidad_banco": diff,
+        "ok": abs(diff) < 1.0,
+        "mensaje": "OK: apertura bancaria actual coincide con cierre anterior." if abs(diff) < 1.0 else "Revisar: la apertura bancaria actual no coincide con el cierre anterior. Puede faltar un movimiento o el rango del extracto no es consecutivo.",
+    }
+
 # =============================================================================
 # MOTOR DE MATCHING
 # =============================================================================
 
 def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Primero cancela pendientes anteriores contra movimientos actuales.
+    """Cancela pendientes anteriores contra movimientos actuales.
 
-    Regularización no entra en C1/C2/C3/C4 corriente.
+    V3 agrega matching agregado: una MB-EXT consolidada puede regularizar varias
+    líneas pendientes anteriores de Banco no Flexxus de la misma categoría.
     """
     regs = []
     if prev_open.empty:
@@ -519,22 +589,66 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
     prev["FechaRegularizacion"] = ""
     prev["Diagnostico"] = "Pendiente anterior abierto"
 
-    # Orden: importe más específico primero y egresos/impuestos primero para evitar colisiones.
+    # 1) Matching agregado de MB-EXT actual contra múltiples pendientes bancarios anteriores.
+    mbext_idx = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"] == "MB-EXT")].index.tolist()
+    for fidx in mbext_idx:
+        monto = float(flex.loc[fidx, "MontoFlexxus"])
+        cat = classify_mbext(flex.loc[fidx, "Movimiento"])
+        if cat == "OTRO_MBEXT":
+            continue
+        candidates = prev[
+            (~prev["Regularizado"]) &
+            (prev["Origen"] == "BANCO_NO_FLEXXUS") &
+            (prev["SignoCalculo"].astype(float) < 0) &
+            (prev["Categoria"].astype(str).eq(cat))
+        ].copy()
+        if candidates.empty:
+            continue
+        total = float(candidates["Monto"].sum())
+        if amount_close(total, monto):
+            flex.loc[fidx, "ConsumedPrev"] = True
+            flex.loc[fidx, "MatchStage"] = "REGULARIZACION_ANTERIOR_AGREGADA"
+            flex.loc[fidx, "MatchRef"] = ",".join(candidates["pending_id"].astype(str).tolist())
+            flex.loc[fidx, "Diagnostico"] = f"Regulariza {len(candidates)} pendientes bancarios anteriores categoría {cat} por suma agregada"
+            flex.loc[fidx, "FechaAcreditacionUsada"] = flex.loc[fidx, "FechaFlexxus"]
+            prev.loc[candidates.index, "Regularizado"] = True
+            prev.loc[candidates.index, "RegularizadoCon"] = flex.loc[fidx, "row_id"]
+            prev.loc[candidates.index, "FechaRegularizacion"] = flex.loc[fidx, "FechaFlexxus"]
+            prev.loc[candidates.index, "Diagnostico"] = f"Regularizado por MB-EXT consolidada {flex.loc[fidx, 'Numero']}"
+            regs.append({
+                "ID pendiente": ",".join(candidates["pending_id"].astype(str).tolist()),
+                "Fecha origen": "Varias",
+                "Origen pendiente": "BANCO_EGRESO_NO_FLEXXUS_AGREGADO",
+                "Concepto pendiente": f"{len(candidates)} líneas pendientes anteriores categoría {cat}",
+                "Categoría pendiente": cat,
+                "Monto pendiente": total,
+                "Regularizado con": "Flexxus",
+                "Fecha regularización": flex.loc[fidx, "FechaFlexxus"],
+                "Tipo actual": "MB-EXT",
+                "Referencia actual": flex.loc[fidx, "Numero"],
+                "Concepto actual": flex.loc[fidx, "Movimiento"],
+                "Monto actual": monto,
+                "Diferencia": round(monto - total, 2),
+                "Diagnóstico": f"Regularización agregada MB-EXT contra {len(candidates)} pendientes anteriores",
+            })
+
+    # 2) Matching 1:1 normal para lo que no fue agregado.
     prev = prev.sort_values(["Monto", "Categoria"], ascending=[False, True]).reset_index(drop=True)
 
     for pidx, p in prev.iterrows():
+        if bool(p.get("Regularizado", False)):
+            continue
         monto = float(p["Monto"])
         signo = int(p.get("SignoCalculo", 0))
         origen = str(p.get("Origen", ""))
         cat = str(p.get("Categoria", "OTRO"))
 
-        # Banco no Flexxus anterior se regulariza con movimiento Flexxus actual.
         if origen == "BANCO_NO_FLEXXUS":
             if signo > 0:
                 candidates = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"] == "PAV")].copy()
             else:
                 candidates = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"].isin(["MB-EXT", "MB-ENT-EX"]))].copy()
-            candidates = candidates[candidates["MontoFlexxus"].apply(lambda x: amount_equal(x, monto))]
+            candidates = candidates[candidates["MontoFlexxus"].apply(lambda x: amount_close(x, monto))]
             if not candidates.empty:
                 candidates["date_diff"] = (candidates["FechaFlexxus_dt"] - safe_date(p.get("FechaOrigen", ""))).abs()
                 best_idx = candidates.sort_values(["date_diff", "row_id"]).index[0]
@@ -542,6 +656,7 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
                 flex.loc[best_idx, "MatchStage"] = "REGULARIZACION_ANTERIOR"
                 flex.loc[best_idx, "MatchRef"] = p["pending_id"]
                 flex.loc[best_idx, "Diagnostico"] = "Regulariza Banco no Flexxus anterior"
+                flex.loc[best_idx, "FechaAcreditacionUsada"] = flex.loc[best_idx, "FechaFlexxus"]
                 prev.loc[pidx, "Regularizado"] = True
                 prev.loc[pidx, "RegularizadoCon"] = flex.loc[best_idx, "row_id"]
                 prev.loc[pidx, "FechaRegularizacion"] = flex.loc[best_idx, "FechaFlexxus"]
@@ -549,15 +664,13 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
                 regs.append(build_reg_row(p, "Flexxus", flex.loc[best_idx].to_dict(), "Regulariza Banco no Flexxus anterior"))
                 continue
 
-        # Flexxus no Banco anterior se regulariza con movimiento bancario actual.
         if origen == "FLEXXUS_NO_BANCO":
             if signo < 0:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & (bank["EsIngreso"])].copy()
             else:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & (bank["EsEgreso"])].copy()
-            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_equal(x, monto))]
+            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_close(x, monto))]
             if not candidates.empty:
-                # categoría compatible flexible
                 comp = candidates[candidates["Categoria"].apply(lambda c: category_compatible(cat, c, origen))]
                 if comp.empty:
                     comp = candidates
@@ -576,7 +689,6 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
 
     regs_df = pd.DataFrame(regs)
     return prev, flex, bank, regs_df
-
 
 def build_reg_row(p, actual_source: str, actual: dict, diag: str) -> dict:
     if actual_source == "Flexxus":
@@ -609,8 +721,75 @@ def build_reg_row(p, actual_source: str, actual: dict, diag: str) -> dict:
     }
 
 
+def match_mbext_current_aggregated(flex: pd.DataFrame, bank: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Matchea MB-EXT corrientes consolidadas contra N líneas bancarias de la misma categoría.
+
+    Esto resuelve el caso real Dancona: Flexxus consolida semanalmente IIBB/IVA/Ley 25413,
+    pero Banco Nación lo muestra en muchas líneas diarias.
+    """
+    rows = []
+    for fidx in flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"] == "MB-EXT")].index.tolist():
+        monto = float(flex.loc[fidx, "MontoFlexxus"])
+        cat = classify_mbext(flex.loc[fidx, "Movimiento"])
+        if cat == "OTRO_MBEXT":
+            continue
+        candidates = bank[
+            (~bank["Matched"]) & (~bank["ConsumedPrev"]) &
+            (bank["EsEgreso"]) & (bank["Categoria"] == cat)
+        ].copy()
+        if candidates.empty:
+            continue
+
+        fecha_f = flex.loc[fidx, "FechaFlexxus_dt"]
+        if pd.notna(fecha_f):
+            win = candidates[(candidates["Fecha_dt"] <= fecha_f + pd.Timedelta(days=1)) & (candidates["Fecha_dt"] >= fecha_f - pd.Timedelta(days=21))]
+        else:
+            win = candidates
+        if win.empty:
+            win = candidates
+
+        total_win = float(win["ImporteAbs"].sum())
+        used = win
+        if not amount_close(total_win, monto):
+            total_all = float(candidates["ImporteAbs"].sum())
+            if amount_close(total_all, monto):
+                used = candidates
+                total_win = total_all
+            else:
+                continue
+
+        flex.loc[fidx, "Matched"] = True
+        flex.loc[fidx, "MatchStage"] = "CORRIENTE_AGREGADO_MBEXT"
+        flex.loc[fidx, "MatchRef"] = ",".join(used["row_id"].astype(str).tolist())
+        flex.loc[fidx, "BancoFecha"] = fmt_date(used["Fecha_dt"].max())
+        flex.loc[fidx, "BancoConcepto"] = f"Consolidado banco {cat}: {len(used)} líneas"
+        flex.loc[fidx, "BancoComprobante"] = "AGREGADO"
+        flex.loc[fidx, "FechaAcreditacionUsada"] = flex.loc[fidx, "FechaFlexxus"]
+        flex.loc[fidx, "Diagnostico"] = f"OK - MB-EXT agregado contra {len(used)} líneas bancarias categoría {cat}"
+
+        bank.loc[used.index, "Matched"] = True
+        bank.loc[used.index, "MatchStage"] = "CORRIENTE_AGREGADO_MBEXT"
+        bank.loc[used.index, "MatchRef"] = flex.loc[fidx, "row_id"]
+        bank.loc[used.index, "FlexxusNumero"] = flex.loc[fidx, "Numero"]
+        bank.loc[used.index, "Diagnostico"] = f"Incluido en MB-EXT agregado {flex.loc[fidx, 'Numero']}"
+        rows.append({
+            "Fecha Flexxus": flex.loc[fidx, "FechaFlexxus"],
+            "Número Flexxus": flex.loc[fidx, "Numero"],
+            "Categoría": cat,
+            "Concepto Flexxus": flex.loc[fidx, "Movimiento"],
+            "Monto Flexxus": monto,
+            "Cantidad líneas banco": len(used),
+            "Total banco": total_win,
+            "Diferencia": round(monto - total_win, 2),
+            "Diagnóstico": "OK agregado MB-EXT",
+        })
+    return flex, bank, pd.DataFrame(rows)
+
+
 def match_current(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Matchea movimientos corrientes Flexxus vs banco, sin tocar regularizaciones anteriores."""
+    flex, bank, mbext_ag = match_mbext_current_aggregated(flex, bank)
+    flex.attrs["mbext_agregado"] = mbext_ag
     # Lookups auxiliares
     qr_lookup = {}
     if not qr.empty and "NetoQR" in qr.columns:
@@ -630,7 +809,7 @@ def match_current(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & bank["EsIngreso"]].copy()
             else:
                 candidates = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & bank["EsEgreso"]].copy()
-            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_equal(x, monto))]
+            candidates = candidates[candidates["ImporteAbs"].apply(lambda x: amount_close(x, monto))]
             if candidates.empty:
                 continue
             candidates["date_diff"] = (candidates["Fecha_dt"] - fecha_f).abs()
@@ -677,11 +856,10 @@ def get_saldo_flexxus(flex: pd.DataFrame) -> float:
     return 0.0
 
 
-def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.DataFrame, regs: pd.DataFrame, mode: str) -> Dict:
+def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.DataFrame, regs: pd.DataFrame, mode: str, prev_summary: Optional[Dict[str, float]] = None) -> Dict:
     saldo_f = get_saldo_flexxus(flex)
-    # Banco Nación exporta normalmente con saldo final en la primera fila del listado; usamos primer movimiento mostrado.
-    # Si el extracto viene ordenado ascendente, el usuario verá un control en el reporte. En los archivos previos era válido bank.iloc[0].
-    saldo_b = float(bank.iloc[0]["SaldoNum"])
+    saldo_b = get_saldo_banco_final(bank)
+    continuity = build_continuity_control(prev_summary or {}, bank)
 
     current_unmatched_f = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"])]
     current_unmatched_b = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"])]
@@ -760,6 +938,8 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
         "current_unmatched_b": current_unmatched_b.copy(),
         "prev_open": prev_open.copy() if not prev_open.empty else pd.DataFrame(),
         "regularizaciones": regs.copy() if regs is not None else pd.DataFrame(),
+        "mbext_agregado": flex.attrs.get("mbext_agregado", pd.DataFrame()),
+        "continuity": continuity,
         "pendientes_proxima": pend_next,
         "matched_flex": flex[flex["Matched"]].copy(),
         "matched_bank": bank[bank["Matched"]].copy(),
@@ -820,7 +1000,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     green_fill = PatternFill("solid", fgColor="E2F0D9")
     red_fill = PatternFill("solid", fgColor="FCE4D6")
 
-    ws["A1"] = "DANCONA ALIMENTOS - CONCILIACIÓN BANCARIA CONTINUA V2"
+    ws["A1"] = "DANCONA ALIMENTOS - CONCILIACIÓN BANCARIA CONTINUA V3"
     ws["A1"].font = title_font
     ws.merge_cells("A1:D1")
     periodo = ""
@@ -862,6 +1042,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Regularizaciones anteriores detectadas", len(res["regularizaciones"])),
         ("Pendientes anteriores aún abiertos", len(res["prev_open"])),
         ("Pendientes para próxima conciliación", len(res["pendientes_proxima"])),
+        ("MB-EXT agregados", len(res.get("mbext_agregado", pd.DataFrame()))),
     ]
     for i, (label, val) in enumerate(controls, 6):
         ws.cell(i, 4, label)
@@ -879,6 +1060,13 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     if regs.empty:
         regs = pd.DataFrame([{"Diagnóstico": "Sin regularizaciones de períodos anteriores detectadas"}])
     write_df(ws_reg, 1, 1, regs, money_cols=["Monto pendiente", "Monto actual", "Diferencia"])
+
+    # MB-EXT agregado
+    ws_ag = wb.create_sheet("MB-EXT agregado")
+    ag = res.get("mbext_agregado", pd.DataFrame())
+    if ag.empty:
+        ag = pd.DataFrame([{"Diagnóstico": "Sin MB-EXT corrientes agregados contra banco"}])
+    write_df(ws_ag, 1, 1, ag, money_cols=["Monto Flexxus", "Total banco", "Diferencia"])
 
     # Pendientes abiertos
     ws_pa = wb.create_sheet("Pendientes abiertos")
@@ -968,6 +1156,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         {"Tema": "Principio", "Detalle": "La conciliación anterior es obligatoria desde la segunda corrida. Si no se adjunta, el sistema trabaja en modo apertura."},
         {"Tema": "Prohibición", "Detalle": "No se permite cerrar con ajuste heredado genérico. Todo saldo heredado debe abrirse movimiento por movimiento."},
         {"Tema": "Regularizaciones", "Detalle": "Un MB-EXT actual puede cancelar egresos bancarios anteriores por IIBB, IVA, Ley 25.413, comisiones o débitos de liquidación."},
+        {"Tema": "MB-EXT agregado", "Detalle": "Si Flexxus consolida impuestos/gastos y Banco los muestra en N líneas, el sistema suma las líneas bancarias por categoría y las matchea contra la MB-EXT."},
         {"Tema": "Carga Flexxus", "Detalle": "El archivo de importación incluye solo movimientos corrientes matcheados contra banco actual. Las regularizaciones anteriores se auditan aparte."},
         {"Tema": "QR", "Detalle": "Neto QR = Monto total × 0,99032."},
         {"Tema": "Pedidos Ya", "Detalle": "Pedidos Ya no se trata como QR ni tarjeta; no se fuerza cupón ni liquidación."},
@@ -1020,8 +1209,8 @@ def render_header():
         """
         <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
           <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-          <div style="font-size:30px;font-weight:700">Conciliación bancaria continua V2</div>
-          <div style="font-size:15px;opacity:.85;margin-top:6px">Con pendientes anteriores, regularizaciones auditables y cierre sin ajustes genéricos.</div>
+          <div style="font-size:30px;font-weight:700">Conciliación bancaria continua V3</div>
+          <div style="font-size:15px;opacity:.85;margin-top:6px">Con pendientes anteriores, regularizaciones auditables y cierre sin ajustes genéricos y matching agregado MB-EXT.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1047,7 +1236,13 @@ def main():
         st.warning("Subí al menos Flexxus actual y Banco Nación actual para procesar.")
         return
 
-    if st.button("Procesar conciliación", type="primary", use_container_width=True):
+    if "run_requested" not in st.session_state:
+        st.session_state.run_requested = False
+
+    if st.button("Comenzar", type="primary", use_container_width=True):
+        st.session_state.run_requested = True
+
+    if st.session_state.run_requested:
         try:
             with st.spinner("Leyendo archivos..."):
                 flex = parse_flexxus(f_flex)
@@ -1061,7 +1256,7 @@ def main():
 
             with st.spinner("Conciliando movimientos corrientes..."):
                 flex, bank = match_current(flex, bank, qr, trx)
-                res = compute_results(flex, bank, prev_status, regs, mode)
+                res = compute_results(flex, bank, prev_status, regs, mode, prev_summary)
 
             st.success("Conciliación procesada.")
 
@@ -1070,6 +1265,20 @@ def main():
             c2.metric("Saldo Banco", f"${res['saldo_banco']:,.2f}")
             c3.metric("Banco calculado", f"${res['calc_final']:,.2f}")
             c4.metric("Diferencia", f"${res['diferencia']:,.2f}")
+
+            cont = res.get("continuity", {})
+            if cont.get("aplica"):
+                st.subheader("Trazabilidad con semana anterior")
+                cc1, cc2, cc3 = st.columns(3)
+                cc1.metric("Saldo banco cierre anterior", f"${cont.get('saldo_banco_cierre_anterior',0):,.2f}")
+                cc2.metric("Apertura banco actual", f"${cont.get('saldo_banco_apertura_actual',0):,.2f}")
+                cc3.metric("Diferencia continuidad banco", f"${cont.get('diferencia_continuidad_banco',0):,.2f}")
+                if cont.get("ok"):
+                    st.success(cont.get("mensaje"))
+                else:
+                    st.warning(cont.get("mensaje"))
+            else:
+                st.info(cont.get("mensaje", "Sin control de continuidad bancaria."))
 
             st.subheader("Prueba explícita")
             proof = pd.DataFrame([
@@ -1098,6 +1307,13 @@ def main():
             else:
                 st.dataframe(res["regularizaciones"], use_container_width=True, hide_index=True)
 
+            st.subheader("MB-EXT agregados contra banco")
+            ag = res.get("mbext_agregado", pd.DataFrame())
+            if ag.empty:
+                st.write("Sin MB-EXT agregados en esta corrida.")
+            else:
+                st.dataframe(ag, use_container_width=True, hide_index=True)
+
             st.subheader("Pendientes abiertos para próxima conciliación")
             pend = res["pendientes_proxima"]
             st.dataframe(pend if not pend.empty else pd.DataFrame([{"Estado": "Sin pendientes abiertos"}]), use_container_width=True, hide_index=True)
@@ -1106,16 +1322,16 @@ def main():
             xls = build_import_xls(res)
 
             st.download_button(
-                "Descargar Excel de conciliación V2",
+                "Descargar Excel de conciliación V3",
                 data=xlsx,
-                file_name="Conciliacion_Semanal_Dancona_V2.xlsx",
+                file_name="Conciliacion_Semanal_Dancona_V3.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
             st.download_button(
                 "Descargar .xls para importar a Flexxus",
                 data=xls,
-                file_name="ASIENTOS_FLEXXUS_V2.xls",
+                file_name="ASIENTOS_FLEXXUS_V3.xls",
                 mime="application/vnd.ms-excel",
                 use_container_width=True,
             )
