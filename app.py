@@ -12,6 +12,10 @@ import io
 import re
 import uuid
 import warnings
+import json
+import base64
+import sys
+import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -19,6 +23,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import xlwt
+try:
+    import requests
+except Exception:
+    requests = None
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -1200,49 +1208,194 @@ def build_import_xls(res: Dict) -> io.BytesIO:
     out.seek(0)
     return out
 
+
 # =============================================================================
-# UI STREAMLIT
+# UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-def render_header():
-    st.markdown(
-        """
-        <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
-          <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-          <div style="font-size:30px;font-weight:700">Conciliación bancaria continua V3</div>
-          <div style="font-size:15px;opacity:.85;margin-top:6px">Con pendientes anteriores, regularizaciones auditables y cierre sin ajustes genéricos y matching agregado MB-EXT.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+APP_VERSION = "V4-INTEGRADA-LOGIN-HISTORIAL-MBEXT-2026-04-29"
+HISTORIAL_FILE = "historico.json"
 
+def secret_get(key: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
-def main():
-    render_header()
+def render_header_v4():
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
+      <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V4</div>
+      <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
+      <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.sidebar.header("Archivos")
-    f_flex = st.sidebar.file_uploader("1 · Conciliación Bancaria Flexxus actual", type=["xls", "xlsx"])
-    f_bank = st.sidebar.file_uploader("2 · Últimos movimientos Banco Nación actual", type=["xls", "xlsx"])
-    f_trx = st.sidebar.file_uploader("3 · TRX Merchant Center", type=["xlsx", "xls"])
-    f_qr = st.sidebar.file_uploader("4 · Transacciones QR", type=["xlsx", "xls"])
-    f_prev = st.sidebar.file_uploader("5 · Conciliación anterior del sistema (opcional solo en primera corrida)", type=["xlsx"])
+def login_gate():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if st.session_state.authenticated:
+        return
+    render_header_v4()
+    st.subheader("🔐 Iniciar sesión")
+    valid_user = secret_get("APP_USER", "dancona2016@gmail.com")
+    valid_password = secret_get("APP_PASSWORD", "Dancona2026*")
+    col1, col2, col3 = st.columns([1, 1.4, 1])
+    with col2:
+        usuario = st.text_input("Usuario", placeholder="email")
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Ingresar", type="primary", use_container_width=True):
+            if usuario == valid_user and password == valid_password:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+    st.stop()
 
-    st.info(
-        "Si no subís conciliación anterior, la corrida se considera **conciliación de apertura**. "
-        "Desde la segunda semana, subí siempre la conciliación anterior para cancelar pendientes y evitar diferencias heredadas genéricas."
-    )
+def reset_app_state():
+    keep = {"authenticated"}
+    for k in list(st.session_state.keys()):
+        if k not in keep:
+            del st.session_state[k]
+    try:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+    except Exception:
+        pass
+
+def github_get_file(filename: str = HISTORIAL_FILE):
+    token = secret_get("GITHUB_TOKEN", "")
+    repo = secret_get("GITHUB_REPO", "")
+    if not token or not repo or requests is None:
+        return None, None, "GitHub no configurado o requests no disponible"
+    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            content = json.loads(base64.b64decode(data["content"]).decode("utf-8"))
+            return content, data.get("sha"), "OK"
+        if r.status_code == 404:
+            return {"semanas": []}, None, "Historial no existe todavía; se creará al guardar."
+        return None, None, f"GitHub HTTP {r.status_code}: {r.text[:250]}"
+    except Exception as e:
+        return None, None, f"Error leyendo GitHub: {e}"
+
+def github_save_file(content_dict: dict, sha=None, filename: str = HISTORIAL_FILE):
+    token = secret_get("GITHUB_TOKEN", "")
+    repo = secret_get("GITHUB_REPO", "")
+    if not token or not repo or requests is None:
+        return False, "GitHub no configurado. La conciliación se generó, pero no se guardó historial."
+    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    encoded = base64.b64encode(json.dumps(content_dict, ensure_ascii=False, indent=2).encode("utf-8")).decode("utf-8")
+    body = {"message": f"Update {filename} - conciliacion V4", "content": encoded}
+    if sha:
+        body["sha"] = sha
+    try:
+        r = requests.put(url, headers=headers, json=body, timeout=20)
+        if r.status_code in (200, 201):
+            return True, "Historial guardado en GitHub."
+        return False, f"GitHub HTTP {r.status_code}: {r.text[:300]}"
+    except Exception as e:
+        return False, f"Error guardando GitHub: {e}"
+
+def guardar_resumen_historial(res: Dict, mode: str):
+    hist, sha, msg = github_get_file()
+    if hist is None:
+        return False, msg
+    hist.setdefault("semanas", [])
+    item = {
+        "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "fecha_proceso": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "version_app": APP_VERSION,
+        "modo": mode,
+        "saldo_flexxus": round(float(res.get("saldo_flexxus", 0)), 2),
+        "saldo_banco": round(float(res.get("saldo_banco", 0)), 2),
+        "banco_calculado": round(float(res.get("calc_final", 0)), 2),
+        "diferencia": round(float(res.get("diferencia", 0)), 2),
+        "C1_flexxus_ingresos_no_banco": round(float(res.get("C1", 0)), 2),
+        "C2_flexxus_egresos_no_banco": round(float(res.get("C2", 0)), 2),
+        "C3_banco_ingresos_no_flexxus": round(float(res.get("C3", 0)), 2),
+        "C4_banco_egresos_no_flexxus": round(float(res.get("C4", 0)), 2),
+        "pendientes_anteriores_abiertos": int(len(res.get("prev_open", pd.DataFrame()))),
+        "regularizaciones_anteriores": int(len(res.get("regularizaciones", pd.DataFrame()))),
+        "pendientes_proxima": int(len(res.get("pendientes_proxima", pd.DataFrame()))),
+        "mbext_agregados": int(len(res.get("mbext_agregado", pd.DataFrame()))),
+    }
+    hist["semanas"].append(item)
+    return github_save_file(hist, sha)
+
+def render_historial_tab():
+    st.subheader("📊 Historial")
+    hist, sha, msg = github_get_file()
+    if hist is None:
+        st.warning(msg)
+        st.info("La app puede conciliar igual. Para guardar historial configurá GITHUB_TOKEN y GITHUB_REPO en Secrets.")
+        return
+    semanas = hist.get("semanas", [])
+    if not semanas:
+        st.info("Todavía no hay conciliaciones guardadas en el historial.")
+        st.caption(msg)
+        return
+    df = pd.DataFrame(semanas)
+    if "fecha_proceso" in df.columns:
+        df = df.sort_values("fecha_proceso", ascending=False)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button("Descargar historico.json", data=json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8"), file_name="historico.json", mime="application/json", use_container_width=True)
+
+def render_diagnostico_tab():
+    st.subheader("🧪 Diagnóstico técnico")
+    st.code(APP_VERSION)
+    st.write("Python")
+    st.code(sys.version)
+    versions = {
+        "streamlit": getattr(st, "__version__", ""),
+        "pandas": pd.__version__,
+        "numpy": np.__version__,
+        "requests": getattr(requests, "__version__", "NO DISPONIBLE") if requests is not None else "NO DISPONIBLE",
+        "xlwt": getattr(xlwt, "__VERSION__", "instalado"),
+    }
+    for mod in ["openpyxl", "xlrd"]:
+        try:
+            m = __import__(mod)
+            versions[mod] = getattr(m, "__version__", "instalado")
+        except Exception as e:
+            versions[mod] = f"ERROR: {e}"
+    st.json(versions)
+    st.write("Estado de sesión")
+    st.json({k: str(v)[:120] for k, v in st.session_state.items() if k not in {"password"}})
+    st.write("Secrets detectados")
+    st.json({"APP_USER": bool(secret_get("APP_USER", "")), "APP_PASSWORD": bool(secret_get("APP_PASSWORD", "")), "GITHUB_TOKEN": bool(secret_get("GITHUB_TOKEN", "")), "GITHUB_REPO": secret_get("GITHUB_REPO", "")})
+
+def render_conciliacion_tab():
+    st.subheader("🏦 Conciliación")
+    st.info("Subí Flexxus y Banco como mínimo. TRX, QR y conciliación anterior mejoran la auditoría. Desde la segunda semana, subí siempre la conciliación anterior para cancelar pendientes.")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        f_flex = st.file_uploader("1 · Conciliación Bancaria Flexxus actual", type=["xls", "xlsx"], key="f_flex_v4")
+        f_trx = st.file_uploader("3 · TRX Merchant Center", type=["xlsx", "xls"], key="f_trx_v4")
+        f_prev = st.file_uploader("5 · Conciliación anterior del sistema", type=["xlsx"], key="f_prev_v4")
+    with col_b:
+        f_bank = st.file_uploader("2 · Últimos movimientos Banco Nación actual", type=["xls", "xlsx"], key="f_bank_v4")
+        f_qr = st.file_uploader("4 · Transacciones QR", type=["xlsx", "xls"], key="f_qr_v4")
+    with st.expander("🧪 Diagnóstico de archivos cargados"):
+        files = {"Flexxus": f_flex, "Banco": f_bank, "TRX": f_trx, "QR": f_qr, "Conciliación anterior": f_prev}
+        st.dataframe(pd.DataFrame([{"Archivo": k, "Cargado": v is not None, "Nombre": getattr(v, "name", ""), "Tamaño bytes": getattr(v, "size", 0) if v is not None else 0} for k, v in files.items()]), use_container_width=True, hide_index=True)
 
     if not f_flex or not f_bank:
-        st.warning("Subí al menos Flexxus actual y Banco Nación actual para procesar.")
+        st.warning("Subí al menos Flexxus actual y Banco Nación actual para habilitar el procesamiento.")
         return
 
-    if "run_requested" not in st.session_state:
-        st.session_state.run_requested = False
+    run = st.button("▶️ Comenzar conciliación", type="primary", use_container_width=True)
+    if st.button("🧹 Limpiar resultado", use_container_width=True):
+        for k in ["last_result_v4", "last_error_v4", "last_xlsx_v4", "last_xls_v4"]:
+            st.session_state.pop(k, None)
+        st.rerun()
 
-    if st.button("Comenzar", type="primary", use_container_width=True):
-        st.session_state.run_requested = True
-
-    if st.session_state.run_requested:
+    if run:
         try:
             with st.spinner("Leyendo archivos..."):
                 flex = parse_flexxus(f_flex)
@@ -1250,96 +1403,120 @@ def main():
                 trx = parse_trx(f_trx) if f_trx else pd.DataFrame()
                 qr = parse_qr(f_qr) if f_qr else pd.DataFrame()
                 prev_open, prev_summary, mode = parse_previous_conciliation(f_prev)
-
             with st.spinner("Cancelando pendientes anteriores contra movimientos actuales..."):
                 prev_status, flex, bank, regs = match_previous_pendings(prev_open, flex, bank)
-
             with st.spinner("Conciliando movimientos corrientes..."):
                 flex, bank = match_current(flex, bank, qr, trx)
                 res = compute_results(flex, bank, prev_status, regs, mode, prev_summary)
-
+            with st.spinner("Generando entregables..."):
+                xlsx = build_excel_report(flex, bank, qr, trx, res)
+                xls = build_import_xls(res)
+            st.session_state.last_result_v4 = res
+            st.session_state.last_xlsx_v4 = xlsx.getvalue()
+            st.session_state.last_xls_v4 = xls.getvalue()
+            st.session_state.last_error_v4 = None
             st.success("Conciliación procesada.")
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Saldo Flexxus", f"${res['saldo_flexxus']:,.2f}")
-            c2.metric("Saldo Banco", f"${res['saldo_banco']:,.2f}")
-            c3.metric("Banco calculado", f"${res['calc_final']:,.2f}")
-            c4.metric("Diferencia", f"${res['diferencia']:,.2f}")
-
-            cont = res.get("continuity", {})
-            if cont.get("aplica"):
-                st.subheader("Trazabilidad con semana anterior")
-                cc1, cc2, cc3 = st.columns(3)
-                cc1.metric("Saldo banco cierre anterior", f"${cont.get('saldo_banco_cierre_anterior',0):,.2f}")
-                cc2.metric("Apertura banco actual", f"${cont.get('saldo_banco_apertura_actual',0):,.2f}")
-                cc3.metric("Diferencia continuidad banco", f"${cont.get('diferencia_continuidad_banco',0):,.2f}")
-                if cont.get("ok"):
-                    st.success(cont.get("mensaje"))
-                else:
-                    st.warning(cont.get("mensaje"))
-            else:
-                st.info(cont.get("mensaje", "Sin control de continuidad bancaria."))
-
-            st.subheader("Prueba explícita")
-            proof = pd.DataFrame([
-                {"Concepto": "Saldo Flexxus actual", "Importe": res["saldo_flexxus"]},
-                {"Concepto": "- C1 corriente: ingresos Flexxus no Banco", "Importe": -res["C1"]},
-                {"Concepto": "+ C2 corriente: egresos Flexxus no Banco", "Importe": res["C2"]},
-                {"Concepto": "+ C3 corriente: ingresos Banco no Flexxus", "Importe": res["C3"]},
-                {"Concepto": "- C4 corriente: egresos Banco no Flexxus", "Importe": -res["C4"]},
-                {"Concepto": "+/- pendientes anteriores aún abiertos", "Importe": res["prev_open_effect"]},
-                {"Concepto": "Banco calculado", "Importe": res["calc_final"]},
-                {"Concepto": "Banco real", "Importe": res["saldo_banco"]},
-                {"Concepto": "Diferencia final", "Importe": res["diferencia"]},
-            ])
-            st.dataframe(proof, use_container_width=True, hide_index=True)
-
-            if abs(res["diferencia"]) >= 1:
-                st.error(
-                    "La diferencia final no da 0. El sistema NO la forzó. Revisá las hojas de pendientes abiertos y movimientos no conciliados."
-                )
-            else:
-                st.success("Diferencia final conciliada en 0,00 o dentro de tolerancia de redondeo.")
-
-            st.subheader("Regularizaciones de períodos anteriores")
-            if res["regularizaciones"].empty:
-                st.write("Sin regularizaciones anteriores detectadas.")
-            else:
-                st.dataframe(res["regularizaciones"], use_container_width=True, hide_index=True)
-
-            st.subheader("MB-EXT agregados contra banco")
-            ag = res.get("mbext_agregado", pd.DataFrame())
-            if ag.empty:
-                st.write("Sin MB-EXT agregados en esta corrida.")
-            else:
-                st.dataframe(ag, use_container_width=True, hide_index=True)
-
-            st.subheader("Pendientes abiertos para próxima conciliación")
-            pend = res["pendientes_proxima"]
-            st.dataframe(pend if not pend.empty else pd.DataFrame([{"Estado": "Sin pendientes abiertos"}]), use_container_width=True, hide_index=True)
-
-            xlsx = build_excel_report(flex, bank, qr, trx, res)
-            xls = build_import_xls(res)
-
-            st.download_button(
-                "Descargar Excel de conciliación V3",
-                data=xlsx,
-                file_name="Conciliacion_Semanal_Dancona_V3.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-            st.download_button(
-                "Descargar .xls para importar a Flexxus",
-                data=xls,
-                file_name="ASIENTOS_FLEXXUS_V3.xls",
-                mime="application/vnd.ms-excel",
-                use_container_width=True,
-            )
-
         except Exception as e:
+            err = traceback.format_exc()
+            st.session_state.last_error_v4 = err
             st.exception(e)
-            st.error("No se pudo procesar. Revisá que los archivos correspondan al formato esperado.")
+            st.error("No se pudo procesar. Descargá el diagnóstico y pasámelo.")
+            st.download_button("Descargar diagnóstico del error", data=err.encode("utf-8"), file_name="diagnostico_error_v4.txt", mime="text/plain")
+            return
 
+    if "last_result_v4" not in st.session_state:
+        st.caption("Esperando que presiones **Comenzar conciliación**.")
+        return
+
+    res = st.session_state.last_result_v4
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Saldo Flexxus", f"${res['saldo_flexxus']:,.2f}")
+    c2.metric("Saldo Banco", f"${res['saldo_banco']:,.2f}")
+    c3.metric("Banco calculado", f"${res['calc_final']:,.2f}")
+    c4.metric("Diferencia", f"${res['diferencia']:,.2f}")
+
+    cont = res.get("continuity", {})
+    if cont.get("aplica"):
+        st.subheader("🔗 Trazabilidad con semana anterior")
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Saldo banco cierre anterior", f"${cont.get('saldo_banco_cierre_anterior',0):,.2f}")
+        cc2.metric("Apertura banco actual", f"${cont.get('saldo_banco_apertura_actual',0):,.2f}")
+        cc3.metric("Diferencia continuidad banco", f"${cont.get('diferencia_continuidad_banco',0):,.2f}")
+        if cont.get("ok"):
+            st.success(cont.get("mensaje"))
+        else:
+            st.warning(cont.get("mensaje"))
+    else:
+        st.info(cont.get("mensaje", "Sin control de continuidad bancaria."))
+
+    st.subheader("Prueba explícita")
+    proof = pd.DataFrame([
+        {"Concepto": "Saldo Flexxus actual", "Importe": res["saldo_flexxus"]},
+        {"Concepto": "- C1 corriente: ingresos Flexxus no Banco", "Importe": -res["C1"]},
+        {"Concepto": "+ C2 corriente: egresos Flexxus no Banco", "Importe": res["C2"]},
+        {"Concepto": "+ C3 corriente: ingresos Banco no Flexxus", "Importe": res["C3"]},
+        {"Concepto": "- C4 corriente: egresos Banco no Flexxus", "Importe": -res["C4"]},
+        {"Concepto": "+/- pendientes anteriores aún abiertos", "Importe": res["prev_open_effect"]},
+        {"Concepto": "Banco calculado", "Importe": res["calc_final"]},
+        {"Concepto": "Banco real", "Importe": res["saldo_banco"]},
+        {"Concepto": "Diferencia final", "Importe": res["diferencia"]},
+    ])
+    st.dataframe(proof, use_container_width=True, hide_index=True)
+    if abs(res["diferencia"]) >= 1:
+        st.error("La diferencia final no da 0. El sistema NO la forzó. Revisá pendientes abiertos y movimientos no conciliados.")
+    else:
+        st.success("Diferencia final conciliada en 0,00 o dentro de tolerancia de redondeo.")
+
+    st.subheader("Regularizaciones de períodos anteriores")
+    if res["regularizaciones"].empty:
+        st.write("Sin regularizaciones anteriores detectadas.")
+    else:
+        st.dataframe(res["regularizaciones"], use_container_width=True, hide_index=True)
+
+    st.subheader("MB-EXT agregados contra banco")
+    ag = res.get("mbext_agregado", pd.DataFrame())
+    if ag.empty:
+        st.write("Sin MB-EXT agregados en esta corrida.")
+    else:
+        st.dataframe(ag, use_container_width=True, hide_index=True)
+
+    st.subheader("Pendientes abiertos para próxima conciliación")
+    pend = res["pendientes_proxima"]
+    st.dataframe(pend if not pend.empty else pd.DataFrame([{"Estado": "Sin pendientes abiertos"}]), use_container_width=True, hide_index=True)
+
+    d1, d2 = st.columns(2)
+    with d1:
+        st.download_button("Descargar Excel de conciliación V4", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V4.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    with d2:
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V4.xls", mime="application/vnd.ms-excel", use_container_width=True)
+
+    if st.button("💾 Guardar resumen en historial", use_container_width=True):
+        ok, msg = guardar_resumen_historial(res, res.get("mode", ""))
+        if ok:
+            st.success(msg)
+        else:
+            st.warning(msg)
+
+def main():
+    login_gate()
+    with st.sidebar:
+        st.markdown("### Sesión")
+        if st.button("Cerrar sesión", use_container_width=True):
+            st.session_state.authenticated = False
+            reset_app_state()
+            st.rerun()
+        if st.button("🔄 Resetear app / limpiar estado", use_container_width=True):
+            reset_app_state()
+            st.rerun()
+        st.caption(APP_VERSION)
+    render_header_v4()
+    tab1, tab2, tab3 = st.tabs(["🏦 Conciliación", "📊 Historial", "🧪 Diagnóstico"])
+    with tab1:
+        render_conciliacion_tab()
+    with tab2:
+        render_historial_tab()
+    with tab3:
+        render_diagnostico_tab()
 
 if __name__ == "__main__":
     main()
