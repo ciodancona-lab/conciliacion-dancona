@@ -67,40 +67,6 @@
         }
       ],
       "eliminado": false
-    },
-    {
-      "id": "20260430_113921",
-      "fecha_proceso": "30/04/2026 11:39:24",
-      "version_app": "V5.8-FINAL-SALDOS-SEPARADOS-FORMULAS-COBERTURA-2026-04-30",
-      "modo": "ANTERIOR",
-      "saldo_flexxus": 32111180.42,
-      "saldo_banco": 34825407.75,
-      "banco_calculado": 34825407.75,
-      "diferencia": 0.0,
-      "C1_flexxus_ingresos_no_banco": 451879.76,
-      "C2_flexxus_egresos_no_banco": 0.0,
-      "C3_banco_ingresos_no_flexxus": 7248088.81,
-      "C4_banco_egresos_no_flexxus": 4081981.72,
-      "pendientes_anteriores_abiertos": 450,
-      "regularizaciones_anteriores": 11,
-      "pendientes_proxima": 575,
-      "trazabilidad_procesada_anterior": 30,
-      "mbext_agregados": 0,
-      "archivos": [
-        {
-          "tipo": "conciliacion_xlsx",
-          "nombre": "Conciliacion_Semanal_Dancona_20260430_113921.xlsx",
-          "path": "historial/20260430_113921/Conciliacion_Semanal_Dancona_20260430_113921.xlsx",
-          "bytes": 91560
-        },
-        {
-          "tipo": "import_flexxus_xls",
-          "nombre": "ASIENTOS_FLEXXUS_20260430_113921.xls",
-          "path": "historial/20260430_113921/ASIENTOS_FLEXXUS_20260430_113921.xls",
-          "bytes": 5632
-        }
-      ],
-      "eliminado": false
     }
   ]
 }
