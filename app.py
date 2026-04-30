@@ -1,5 +1,5 @@
 # app.py
-# Versión estable V5.3: conciliación bancaria continua Grupo Dancona.
+# Versión estable V5.5: conciliación bancaria continua Grupo Dancona.
 # Integra login, historial, administrador de archivos, diagnóstico/reset,
 # conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
 # matching agregado MB-EXT/PAV-QR, Pedidos Ya y exportación Flexxus.
@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V5.3",
+    page_title="Conciliación Bancaria Dancona · V5.5",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1444,7 +1444,7 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
     saldo_b = get_saldo_banco_final(bank)
     continuity = build_continuity_control(prev_summary or {}, bank)
 
-    # V5.3: ningún movimiento "pendiente anterior repetido" puede quedar en zona muerta.
+    # V5.5: ningún movimiento "pendiente anterior repetido" puede quedar en zona muerta.
     # Si vuelve a aparecer en el extracto/archivo actual y sigue abierto, debe figurar en su bloque natural.
     repeat_b = bank[(bank["ConsumedPrev"]) & (bank["MatchStage"].astype(str).eq("PENDIENTE_ANTERIOR_REPETIDO"))].copy()
     base_f = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"])].copy()
@@ -1811,6 +1811,97 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             return "—", "", "No encontrado en TRX", "—", ""
         return "—", "No encontrado en QR ni TRX", "", "—", ""
 
+    def enrich_bank_income_pending_row(p):
+        """Identifica local/cupón/liquidación para ingresos de Banco no Flexxus.
+
+        V5.5:
+        1) Si el comprobante bancario es un código de comercio Merchant, asigna local directo.
+        2) Si es liquidación de tarjeta, busca match exacto en TRX por importe y comercio.
+        3) Si es QR, busca match exacto en QR PCT por neto e informa local/cupón.
+        4) Si no hay match fino, nunca deja local vacío cuando el banco trae comercio.
+        """
+        monto = float(p.get("Monto", 0.0) or 0.0)
+        cat = str(p.get("Categoria", ""))
+        concepto = str(p.get("Concepto", ""))
+        comprobante = str(p.get("Numero", p.get("Comprobante banco", ""))).strip()
+        cat_norm = norm_txt(cat + " " + concepto)
+        comp_digits = re.sub(r"[^0-9]", "", comprobante)
+        local_from_bank = LOCAL_MAP.get(comp_digits, "")
+
+        is_card = (cat == "LIQUIDACION_TARJETA" or "LIQ" in cat_norm or "TARJETA" in cat_norm or "AMEX" in cat_norm or "MASTER" in cat_norm)
+        is_qr = (cat == "QR" or "DEBIN" in cat_norm or "QR" in cat_norm)
+
+        best_trx = None
+        best_trx_diff = float("inf")
+        if is_card and trx is not None and not trx.empty and "MontoNeto" in trx.columns:
+            trx_candidates = trx.copy()
+            if comp_digits and "COMERCIO" in trx_candidates.columns:
+                by_comercio = trx_candidates[trx_candidates["COMERCIO"].astype(str).str.replace(r"\D", "", regex=True).eq(comp_digits)]
+                if not by_comercio.empty:
+                    trx_candidates = by_comercio
+            for _, t in trx_candidates.iterrows():
+                try:
+                    neto = float(t.get("MontoNeto", t.get("IMPORTE NETO", 0.0)) or 0.0)
+                except Exception:
+                    continue
+                diff = abs(neto - monto)
+                if diff < best_trx_diff and diff <= max(0.05, monto * 0.00001):
+                    best_trx = t
+                    best_trx_diff = diff
+
+        if best_trx is not None:
+            comercio = re.sub(r"[^0-9]", "", str(best_trx.get("COMERCIO", "")))
+            local = LOCAL_MAP.get(comercio, local_from_bank or str(best_trx.get("Local", comercio)) or "No identificado")
+            liq = str(best_trx.get("NUMERO LIQUIDACION", best_trx.get("Número Liquidación", "")))
+            comp = round(float(best_trx.get("MontoNeto", best_trx.get("IMPORTE NETO", 0.0)) or 0.0), 2)
+            return local, "", liq, comp, round(monto - comp, 2), "TRX Merchant", "Identificado por TRX / liquidación tarjeta"
+
+        best_qr = None
+        best_qr_diff = float("inf")
+        if is_qr and qr is not None and not qr.empty and "NetoQR" in qr.columns:
+            for _, q in qr.iterrows():
+                try:
+                    neto = float(q.get("NetoQR", 0.0) or 0.0)
+                except Exception:
+                    continue
+                diff = abs(neto - monto)
+                if diff < best_qr_diff and diff <= max(0.05, monto * 0.00001):
+                    best_qr = q
+                    best_qr_diff = diff
+
+        if best_qr is not None:
+            cod = re.sub(r"[^0-9]", "", str(best_qr.get("CodComercio", best_qr.get("Cód. comercio", ""))))
+            local = LOCAL_MAP.get(cod, local_from_bank or cod or "No identificado")
+            cupon = str(best_qr.get("Cupon", best_qr.get("Ticket", best_qr.get("Id QR", ""))))
+            comp = round(float(best_qr.get("NetoQR", 0.0) or 0.0), 2)
+            return local, cupon, "", comp, round(monto - comp, 2), "QR PCT", "Identificado por Transacciones QR"
+
+        if local_from_bank and is_card:
+            return local_from_bank, "", "No encontrado en TRX", "—", "", "Banco/comprobante", "Local identificado por comprobante bancario; falta número de liquidación TRX"
+        if local_from_bank:
+            return local_from_bank, "", "", "—", "", "Banco/comprobante", "Local identificado por comprobante bancario"
+
+        if cat == "TRANSFERENCIA_ENTRANTE":
+            return "No identificado", "", "", "—", "", "Banco", "Transferencia entrante sin local detectado"
+        if is_card:
+            return "No identificado", "", "No encontrado en TRX", "—", "", "Banco", "Liquidación tarjeta sin match TRX/local"
+        if is_qr:
+            return "No identificado", "No encontrado en QR", "", "—", "", "Banco", "QR bancario sin match QR PCT/local"
+        return "No identificado", "", "", "—", "", "Banco", "Origen/local no identificado"
+
+    def add_local_delay_rows(base_rows, local, bloque, categoria, monto, estado, origen, accion):
+        loc = str(local or "No identificado").strip() or "No identificado"
+        base_rows.append({
+            "Local": loc,
+            "Bloque": bloque,
+            "Categoría": CAT_LABELS.get(categoria, categoria),
+            "Cantidad": 1,
+            "Importe": float(monto or 0.0),
+            "Estado trazabilidad": estado,
+            "Origen detectado": origen,
+            "Acción sugerida": accion,
+        })
+
     # HOJA 1: Conciliacion semanal
     ws.cell(1, 1, "DANCONA ALIMENTOS - CONCILIACIÓN BANCARIA SEMANAL").font = title_f
     ws.merge_cells("A1:C1")
@@ -1957,7 +2048,14 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         for _, p in pbi.iterrows():
             cat = p.get("Categoria", "")
             cat_label = CAT_LABELS.get(cat, cat)
-            dw(ws4, rn, [p.get("pending_id", ""), p.get("Estado", ""), "Banco ingreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cat_label, float(p.get("Monto", 0.0)), "", cat_label, p.get("Fuente", ""), "", "", "", "", "", "Ingreso bancario pendiente abierto", "Verificar si corresponde registrar como PAV o regularización"], mc=[8, 9])
+            local, cupon, liq, monto_comp, dif, archivo_aux, diag_local = enrich_bank_income_pending_row(p)
+            archivo = str(p.get("Fuente", ""))
+            if archivo_aux and archivo_aux not in archivo:
+                archivo = (archivo + " | " + archivo_aux).strip(" |")
+            accion = "Cargar/regularizar en Flexxus como PAV o identificar cliente/local"
+            if local == "No identificado":
+                accion = "URGENTE: identificar local/origen antes de cerrar rutina administrativa"
+            dw(ws4, rn, [p.get("pending_id", ""), p.get("Estado", ""), "Banco ingreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cat_label, float(p.get("Monto", 0.0)), "", cat_label, archivo, local, cupon, liq, monto_comp, dif, diag_local, accion], mc=[8, 9, 15, 16])
             rn += 1
     frz(ws4); aw(ws4)
 
@@ -2064,8 +2162,86 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             rn += 1
     frz(ws8); aw(ws8)
 
+    # HOJA 10: Resumen atraso por local
+    ws_loc = wb.create_sheet("Resumen atraso por local")
+    ws_loc.cell(1, 1, "Resumen de atraso/carga pendiente por local").font = sub_f
+    ws_loc.cell(2, 1, "Este tablero no sanciona por timing bancario normal; marca pendientes atribuibles o no identificados para seguimiento operativo.").font = norm
+    local_rows = []
 
-    # HOJA 10: Control cobertura
+    if not pbi.empty:
+        for _, p in pbi.iterrows():
+            local, cupon, liq, monto_comp, dif, archivo_aux, diag_local = enrich_bank_income_pending_row(p)
+            cat = p.get("Categoria", "")
+            accion = "Identificar local/origen" if local == "No identificado" else "Revisar carga pendiente en Flexxus / cierre administrativo del local"
+            add_local_delay_rows(local_rows, local, "Banco ingreso no Flexxus", cat, p.get("Monto", 0.0), p.get("Estado", ""), diag_local, accion)
+
+    if not pf.empty:
+        for _, p in pf.iterrows():
+            local, cupon, liq, monto_comp, dif = enrich_flexxus_pending_row(p)
+            loc = local if local not in ["", "—"] else "No identificado"
+            cat = p.get("Categoria", p.get("TipoMovimiento", ""))
+            add_local_delay_rows(local_rows, loc, "Flexxus no Banco", cat, p.get("Monto", 0.0), p.get("Estado", ""), "Detectado desde Flexxus/TRX/QR" if loc != "No identificado" else "Flexxus pendiente sin local detectado", "Verificar acreditación bancaria o fecha de cierre")
+
+    if not pbe.empty:
+        # Egresos bancarios/impuestos suelen ser administración central, pero se incluyen para no perder trazabilidad.
+        for _, p in pbe.iterrows():
+            cat = p.get("Categoria", "")
+            local = "Administración/Banco" if cat in IMP_CATS else "No identificado"
+            accion = flexxus_copy_instruction(cat, float(p.get("Monto", 0.0)), p.get("FechaOrigen", ""), p.get("Concepto", "")) if cat in IMP_CATS else "Revisar egreso bancario"
+            add_local_delay_rows(local_rows, local, "Banco egreso no Flexxus", cat, p.get("Monto", 0.0), p.get("Estado", ""), "Banco / impuesto / gasto" if cat in IMP_CATS else "Banco egreso sin local", accion)
+
+    hw(ws_loc, 4, ["Local", "Cantidad pendientes", "Importe total observado", "Banco ingresos no Flexxus", "Flexxus no Banco", "Banco egresos no Flexxus", "Categoría dominante", "Severidad", "Comunicado sugerido"])
+    rn_loc = 5
+    if local_rows:
+        ldf = pd.DataFrame(local_rows)
+        # Resumen por local
+        for local, grp in ldf.groupby("Local", dropna=False):
+            cantidad = int(grp["Cantidad"].sum())
+            importe_total = float(grp["Importe"].sum())
+            bi = float(grp.loc[grp["Bloque"].eq("Banco ingreso no Flexxus"), "Importe"].sum())
+            fb = float(grp.loc[grp["Bloque"].eq("Flexxus no Banco"), "Importe"].sum())
+            be = float(grp.loc[grp["Bloque"].eq("Banco egreso no Flexxus"), "Importe"].sum())
+            cats = grp.groupby("Categoría")["Cantidad"].sum().sort_values(ascending=False)
+            cat_dom = str(cats.index[0]) if not cats.empty else ""
+            if local == "No identificado" or bi > 500000 or cantidad >= 10:
+                sev = "ALTA"
+            elif bi > 100000 or cantidad >= 4:
+                sev = "MEDIA"
+            else:
+                sev = "BAJA"
+            if local == "No identificado":
+                comunicado = "Identificar origen/local de movimientos bancarios no registrados antes del cierre."
+            elif bi > 0:
+                comunicado = f"{local}: revisar carga pendiente en Flexxus por ingresos bancarios no registrados y cierre administrativo."
+            elif fb > 0:
+                comunicado = f"{local}: verificar PAV/ventas cargadas en Flexxus pendientes de acreditación bancaria."
+            else:
+                comunicado = f"{local}: revisar egresos/impuestos/gastos pendientes de registro."
+            dw(ws_loc, rn_loc, [local, cantidad, importe_total, bi, fb, be, cat_dom, sev, comunicado], mc=[3,4,5,6])
+            if sev == "ALTA":
+                ws_loc.cell(rn_loc, 8).fill = red_fill
+                ws_loc.cell(rn_loc, 8).font = Font(bold=True, color="C00000")
+            elif sev == "MEDIA":
+                ws_loc.cell(rn_loc, 8).fill = PatternFill("solid", fgColor="FFF2CC")
+                ws_loc.cell(rn_loc, 8).font = Font(bold=True, color="9C6500")
+            else:
+                ws_loc.cell(rn_loc, 8).fill = grn_fill
+                ws_loc.cell(rn_loc, 8).font = Font(bold=True, color="375623")
+            rn_loc += 1
+
+        rn_loc += 2
+        ws_loc.cell(rn_loc, 1, "Detalle de hallazgos por local").font = sub_f
+        hw(ws_loc, rn_loc + 1, ["Local", "Bloque", "Categoría", "Importe", "Estado trazabilidad", "Origen detectado", "Acción sugerida"])
+        rn_loc += 2
+        for _, r in ldf.sort_values(["Local", "Bloque", "Categoría"]).iterrows():
+            dw(ws_loc, rn_loc, [r["Local"], r["Bloque"], r["Categoría"], float(r["Importe"]), r["Estado trazabilidad"], r["Origen detectado"], r["Acción sugerida"]], mc=[4])
+            rn_loc += 1
+    else:
+        ws_loc.cell(rn_loc, 1, "Sin pendientes atribuibles a local en esta corrida.").font = norm
+    frz(ws_loc); aw(ws_loc, mx=70)
+
+
+    # HOJA 11: Control cobertura
     ws_cov = wb.create_sheet("Control cobertura")
     ws_cov.cell(1, 1, "Control de cobertura total: ninguna línea puede quedar en zona muerta").font = sub_f
     hw(ws_cov, 2, ["Fuente", "Control", "Total fuente", "Total clasificado", "Diferencia", "Estado", "Observación"])
@@ -2141,7 +2317,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Local", "Locales: " + ", ".join([f"{k}={v}" for k, v in LOCAL_MAP.items()])),
         ("Pedidos Ya", "PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación."),
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
-        ("V5.3", "Excel con fórmulas reales, B14 sin impacto residual, saldos separados y hoja Control cobertura para evitar movimientos en zona muerta."),
+        ("V5.5", "Corrige identificación de local/liquidación en Banco ingresos no Flexxus: usa TRX exacto, QR PCT y fallback por comprobante banco=código de comercio."),
     ]
     for i, (t, d) in enumerate(notas, 2):
         ws_n.cell(i, 1, t).font = bold_f
@@ -2190,7 +2366,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.3-AUDITORIA-COBERTURA-REPETIDOS-SIN-ZONA-MUERTA-2026-04-30"
+APP_VERSION = "V5.5-TRX-HISTORICO-LOCAL-COMPROBANTE-FIX-2026-04-30"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -2203,7 +2379,7 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.3</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.5</div>
       <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
@@ -2613,9 +2789,9 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V5.3", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_3.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.5", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_3.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_5.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
