@@ -1,5 +1,5 @@
 # app.py
-# Versión estable V5.5: conciliación bancaria continua Grupo Dancona.
+# Versión estable V5.6: conciliación bancaria continua Grupo Dancona.
 # Integra login, historial, administrador de archivos, diagnóstico/reset,
 # conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
 # matching agregado MB-EXT/PAV-QR, Pedidos Ya y exportación Flexxus.
@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V5.5",
+    page_title="Conciliación Bancaria Dancona · V5.6",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1589,6 +1589,49 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
         "consumed_prev_bank": bank[bank["ConsumedPrev"]].copy(),
     }
 
+
+
+def split_pendientes_para_ui(pend: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Separa la tabla interna de trazabilidad en tres grupos visibles.
+
+    - Pendientes reales: movimientos abiertos que siguen vivos para próxima conciliación.
+    - Procesados históricos: filas usadas solo para trazabilidad/reproceso, no son pendientes.
+    - Controles: ajustes técnicos menores o controles de continuidad visibles.
+    """
+    if pend is None or pend.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+
+    df = pend.copy()
+    for col in ["Origen", "Estado", "TipoPendiente", "Categoria"]:
+        if col not in df.columns:
+            df[col] = ""
+    if "SignoCalculo" not in df.columns:
+        df["SignoCalculo"] = 0
+
+    origen = df["Origen"].astype(str)
+    estado = df["Estado"].astype(str)
+    tipo = df["TipoPendiente"].astype(str)
+    categoria = df["Categoria"].astype(str)
+    signo = pd.to_numeric(df["SignoCalculo"], errors="coerce").fillna(0.0)
+
+    is_procesado = (
+        origen.str.contains("PROCESADO", case=False, na=False)
+        | estado.str.contains("PROCESADO", case=False, na=False)
+        | tipo.str.contains("PROCESADO", case=False, na=False)
+    )
+    is_control = (
+        estado.str.contains("CONTROL", case=False, na=False)
+        | categoria.eq("AJUSTE_MENOR_REDONDEO")
+        | df.get("Numero", pd.Series([""] * len(df), index=df.index)).astype(str).str.contains("CTRL", case=False, na=False)
+    )
+    is_natural_open = origen.isin(["FLEXXUS_NO_BANCO", "BANCO_NO_FLEXXUS"]) & (signo != 0)
+
+    pendientes_reales = df[is_natural_open & ~is_procesado & ~is_control].copy()
+    procesados = df[is_procesado].copy()
+    controles = df[is_control & ~is_procesado].copy()
+    return pendientes_reales, procesados, controles
+
 # =============================================================================
 # EXCEL OUTPUT
 # =============================================================================
@@ -2317,6 +2360,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Local", "Locales: " + ", ".join([f"{k}={v}" for k, v in LOCAL_MAP.items()])),
         ("Pedidos Ya", "PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación."),
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
+        ("V5.6", "Separa pendientes reales abiertos de movimientos ya procesados/históricos en la pantalla principal y en el conteo del historial."),
         ("V5.5", "Corrige identificación de local/liquidación en Banco ingresos no Flexxus: usa TRX exacto, QR PCT y fallback por comprobante banco=código de comercio."),
     ]
     for i, (t, d) in enumerate(notas, 2):
@@ -2366,7 +2410,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.5-TRX-HISTORICO-LOCAL-COMPROBANTE-FIX-2026-04-30"
+APP_VERSION = "V5.6-PENDIENTES-REALES-PROCESADOS-SEPARADOS-2026-04-30"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -2379,7 +2423,7 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.5</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.6</div>
       <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
@@ -2554,7 +2598,8 @@ def guardar_resumen_historial(res: Dict, mode: str, xlsx_bytes: bytes = None, xl
         "C4_banco_egresos_no_flexxus": round(float(res.get("C4", 0)), 2),
         "pendientes_anteriores_abiertos": int(len(res.get("prev_open", pd.DataFrame()))),
         "regularizaciones_anteriores": int(len(res.get("regularizaciones", pd.DataFrame()))),
-        "pendientes_proxima": int(len(res.get("pendientes_proxima", pd.DataFrame()))),
+        "pendientes_proxima": int(len(split_pendientes_para_ui(res.get("pendientes_proxima", pd.DataFrame()))[0])),
+        "trazabilidad_procesada_anterior": int(len(split_pendientes_para_ui(res.get("pendientes_proxima", pd.DataFrame()))[1])),
         "mbext_agregados": int(len(res.get("mbext_agregado", pd.DataFrame()))),
         "archivos": archivos,
         "eliminado": False,
@@ -2783,15 +2828,35 @@ def render_conciliacion_tab():
     else:
         st.dataframe(ag, use_container_width=True, hide_index=True)
 
-    st.subheader("Pendientes abiertos para próxima conciliación")
-    pend = res["pendientes_proxima"]
-    st.dataframe(pend if not pend.empty else pd.DataFrame([{"Estado": "Sin pendientes abiertos"}]), use_container_width=True, hide_index=True)
+    st.subheader("Pendientes abiertos reales para próxima conciliación")
+    pend = res.get("pendientes_proxima", pd.DataFrame())
+    pend_reales, pend_procesados, pend_controles = split_pendientes_para_ui(pend)
+
+    pcol1, pcol2, pcol3 = st.columns(3)
+    pcol1.metric("Pendientes reales abiertos", len(pend_reales))
+    pcol2.metric("Trazabilidad procesada anterior", len(pend_procesados))
+    pcol3.metric("Controles técnicos visibles", len(pend_controles))
+
+    if pend_reales.empty:
+        st.success("No quedan pendientes reales abiertos para próxima conciliación.")
+        st.dataframe(pd.DataFrame([{"Estado": "Sin pendientes abiertos reales"}]), use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(pend_reales, use_container_width=True, hide_index=True)
+
+    if not pend_procesados.empty:
+        with st.expander("Ver trazabilidad histórica / movimientos ya procesados (no son pendientes abiertos)", expanded=False):
+            st.info("Estas filas se conservan para auditoría y reprocesos, pero no deben tratarse como pendientes abiertos.")
+            st.dataframe(pend_procesados, use_container_width=True, hide_index=True)
+
+    if not pend_controles.empty:
+        with st.expander("Ver controles técnicos menores", expanded=False):
+            st.dataframe(pend_controles, use_container_width=True, hide_index=True)
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V5.5", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.6", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_5.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_6.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
