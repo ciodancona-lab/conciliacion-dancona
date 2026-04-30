@@ -1,5 +1,5 @@
 # app.py
-# Versión estable V5.0: conciliación bancaria continua Grupo Dancona.
+# Versión estable V5.3: conciliación bancaria continua Grupo Dancona.
 # Integra login, historial, administrador de archivos, diagnóstico/reset,
 # conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
 # matching agregado MB-EXT/PAV-QR, Pedidos Ya y exportación Flexxus.
@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V5.0",
+    page_title="Conciliación Bancaria Dancona · V5.3",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1444,63 +1444,29 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
     saldo_b = get_saldo_banco_final(bank)
     continuity = build_continuity_control(prev_summary or {}, bank)
 
-    current_unmatched_f = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"])]
-    current_unmatched_b = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"])]
-
-    C1 = current_unmatched_f[current_unmatched_f["Tipo"] == "PAV"]["MontoFlexxus"].sum()
-    C2 = current_unmatched_f[current_unmatched_f["Tipo"].isin(["MB-ENT-EX", "MB-EXT"])]["MontoFlexxus"].sum()
-    C3 = current_unmatched_b[current_unmatched_b["EsIngreso"]]["ImporteAbs"].sum()
-    C4 = current_unmatched_b[current_unmatched_b["EsEgreso"]]["ImporteAbs"].sum()
+    # V5.3: ningún movimiento "pendiente anterior repetido" puede quedar en zona muerta.
+    # Si vuelve a aparecer en el extracto/archivo actual y sigue abierto, debe figurar en su bloque natural.
+    repeat_b = bank[(bank["ConsumedPrev"]) & (bank["MatchStage"].astype(str).eq("PENDIENTE_ANTERIOR_REPETIDO"))].copy()
+    base_f = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"])].copy()
+    base_b = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"])].copy()
+    current_unmatched_f = base_f
+    if not repeat_b.empty:
+        base_b.attrs = {}
+        repeat_b.attrs = {}
+        current_unmatched_b = pd.concat([base_b, repeat_b], ignore_index=False)
+    else:
+        current_unmatched_b = base_b
 
     if prev_status is None or prev_status.empty:
         prev_open = pd.DataFrame()
-        prev_open_effect = 0.0
     else:
         prev_open = prev_status[~prev_status.get("Regularizado", False)].copy()
-        prev_open_effect = float((prev_open["Monto"] * prev_open["SignoCalculo"]).sum()) if not prev_open.empty else 0.0
 
-    calc = saldo_f - C1 + C2 + C3 - C4 + prev_open_effect
-    diff = round(saldo_b - calc, 2)
-
-    ajuste_menor = 0.0
-    if abs(diff) > 0.005 and abs(diff) <= 10.0:
-        ajuste_menor = float(diff)
-        fecha_aj = fmt_date(bank["Fecha_dt"].max()) if not bank.empty and "Fecha_dt" in bank.columns else ""
-        ajuste_row = {
-            "row_id": f"AJ-{uuid.uuid4().hex[:10]}",
-            "SourceOrder": 999999,
-            "Fecha": fecha_aj,
-            "Fecha_dt": safe_date(fecha_aj),
-            "Comprobante": "AJUSTE_MENOR",
-            "Concepto": "Diferencia menor de redondeo/extracto para cierre auditado",
-            "ConceptoNorm": "DIFERENCIA MENOR REDONDEO EXTRACTO",
-            "ImporteNum": abs(ajuste_menor) if ajuste_menor > 0 else -abs(ajuste_menor),
-            "ImporteAbs": abs(ajuste_menor),
-            "SaldoNum": saldo_b,
-            "EsIngreso": ajuste_menor > 0,
-            "EsEgreso": ajuste_menor < 0,
-            "Categoria": "AJUSTE_MENOR_REDONDEO",
-            "Matched": False,
-            "ConsumedPrev": False,
-            "MatchStage": "AJUSTE_MENOR",
-            "MatchRef": "",
-            "FlexxusNumero": "",
-            "Diagnostico": "Ajuste técnico menor <= $5 para igualar extracto; revisar si el banco oculta/agrupa centavos",
-        }
-        current_unmatched_b = pd.concat([current_unmatched_b, pd.DataFrame([ajuste_row])], ignore_index=True)
-        if ajuste_menor > 0:
-            C3 += abs(ajuste_menor)
-        else:
-            C4 += abs(ajuste_menor)
-        calc = saldo_f - C1 + C2 + C3 - C4 + prev_open_effect
-        diff = round(saldo_b - calc, 2)
-
-    # Generar pendientes abiertos para próxima conciliación: anteriores no regularizados + nuevos corrientes.
     next_pendings = []
     if not prev_open.empty:
         for _, p in prev_open.iterrows():
             d = p.to_dict()
-            d["Estado"] = "ABIERTO_ANTERIOR"
+            d["Estado"] = d.get("Estado", "ABIERTO_ANTERIOR") or "ABIERTO_ANTERIOR"
             d["Fuente"] = d.get("Fuente", "") or "Pendiente anterior aún abierto"
             next_pendings.append(d)
 
@@ -1538,16 +1504,75 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
         })
 
     pend_next = assign_stable_pending_ids(pd.DataFrame(next_pendings))
+    if pend_next.empty:
+        C1 = C2 = C3 = C4 = 0.0
+    else:
+        pf = pend_next[pend_next["Origen"].astype(str).eq("FLEXXUS_NO_BANCO")].copy()
+        pbi = pend_next[(pend_next["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")) & (pend_next["SignoCalculo"].astype(float) > 0)].copy()
+        pbe = pend_next[(pend_next["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")) & (pend_next["SignoCalculo"].astype(float) < 0)].copy()
+        C1 = float(pf[pf["TipoMovimiento"].astype(str).eq("PAV")]["Monto"].sum()) if not pf.empty else 0.0
+        C2 = float(pf[~pf["TipoMovimiento"].astype(str).eq("PAV")]["Monto"].sum()) if not pf.empty else 0.0
+        C3 = float(pbi["Monto"].sum()) if not pbi.empty else 0.0
+        C4 = float(pbe["Monto"].sum()) if not pbe.empty else 0.0
+
+    calc = saldo_f - C1 + C2 + C3 - C4
+    diff = round(saldo_b - calc, 2)
+
+    if abs(diff) > 0.005 and abs(diff) <= 1.0:
+        fecha_aj = fmt_date(bank["Fecha_dt"].max()) if not bank.empty and "Fecha_dt" in bank.columns else ""
+        ajuste_row = {
+            "row_id": f"AJ-{uuid.uuid4().hex[:10]}",
+            "SourceOrder": 999999,
+            "Fecha": fecha_aj,
+            "Fecha_dt": safe_date(fecha_aj),
+            "Comprobante": "CTRL-CONTINUIDAD",
+            "Concepto": "Diferencia técnica menor de continuidad/extracto bancario",
+            "ConceptoNorm": "DIFERENCIA TECNICA MENOR CONTINUIDAD EXTRACTO BANCARIO",
+            "ImporteNum": abs(diff) if diff > 0 else -abs(diff),
+            "ImporteAbs": abs(diff),
+            "SaldoNum": saldo_b,
+            "EsIngreso": diff > 0,
+            "EsEgreso": diff < 0,
+            "Categoria": "AJUSTE_MENOR_REDONDEO",
+            "Matched": False,
+            "ConsumedPrev": False,
+            "MatchStage": "CONTROL_CONTINUIDAD_MENOR",
+            "MatchRef": "",
+            "FlexxusNumero": "",
+            "Diagnostico": "Control visible: diferencia menor <= $1 entre fórmula y extracto; no es ajuste oculto",
+        }
+        current_unmatched_b = pd.concat([current_unmatched_b, pd.DataFrame([ajuste_row])], ignore_index=True)
+        next_pendings.append({
+            "pending_id": stable_pending_id("BANCO_NO_FLEXXUS", fecha_aj, "CTRL-CONTINUIDAD", "CTRL-CONTINUIDAD", "Diferencia técnica menor de continuidad/extracto bancario", "AJUSTE_MENOR_REDONDEO", abs(diff)),
+            "FechaOrigen": fecha_aj,
+            "Origen": "BANCO_NO_FLEXXUS",
+            "TipoPendiente": "BANCO_INGRESO_NO_FLEXXUS" if diff > 0 else "BANCO_EGRESO_NO_FLEXXUS",
+            "TipoMovimiento": "PAV" if diff > 0 else "MB-EXT",
+            "Numero": "CTRL-CONTINUIDAD",
+            "Concepto": "Diferencia técnica menor de continuidad/extracto bancario",
+            "Categoria": "AJUSTE_MENOR_REDONDEO",
+            "Monto": abs(float(diff)),
+            "SignoCalculo": 1 if diff > 0 else -1,
+            "Estado": "CONTROL_CONTINUIDAD_MENOR",
+            "Fuente": "Control de cobertura",
+        })
+        pend_next = assign_stable_pending_ids(pd.DataFrame(next_pendings))
+        if diff > 0:
+            C3 += abs(diff)
+        else:
+            C4 += abs(diff)
+        calc = saldo_f - C1 + C2 + C3 - C4
+        diff = round(saldo_b - calc, 2)
 
     return {
         "mode": mode,
-        "saldo_flexxus": saldo_f,
-        "saldo_banco": saldo_b,
+        "saldo_flexxus": float(saldo_f),
+        "saldo_banco": float(saldo_b),
         "C1": float(C1),
         "C2": float(C2),
         "C3": float(C3),
         "C4": float(C4),
-        "prev_open_effect": float(prev_open_effect),
+        "prev_open_effect": 0.0,
         "calc_final": float(calc),
         "diferencia": float(diff),
         "current_unmatched_f": current_unmatched_f.copy(),
@@ -1793,49 +1818,46 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     ws.cell(3, 1, titulo_periodo).font = norm
     ws.merge_cells("A3:C3")
 
-    r0 = 5
-    ws.cell(r0, 1, "Concepto").font = bold_f
-    ws.cell(r0, 2, "Importe").font = bold_f
-    base_rows = [
-        (f"Saldo S/Extracto Bancario al {period_max}", res["saldo_banco"]),
-        (f"Saldo S/FLEXXUS al {period_max}", res["saldo_flexxus"]),
-        ("DIFERENCIA INICIAL (extracto banco vs libro Flexxus)", round(res["saldo_banco"] - res["saldo_flexxus"], 2)),
-    ]
-    for i, (label, val) in enumerate(base_rows, r0 + 1):
-        ws.cell(i, 1, label).font = norm
-        c = ws.cell(i, 2, float(val)); c.number_format = money_fmt
+    ws.cell(5, 1, "Concepto").font = bold_f
+    ws.cell(5, 2, "Importe").font = bold_f
 
-    rows_calc = [
-        ("Menos: INGRESOS registrados en FLEXXUS que NO están en el Banco", res["C1"]),
-        ("Más: EGRESOS registrados en FLEXXUS que NO están en el Banco", res["C2"]),
-        ("Más: INGRESOS en el Banco pero NO registrados en FLEXXUS", res["C3"]),
-        ("Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS", res["C4"]),
+    resumen_rows = [
+        (6, f"Saldo S/Extracto Bancario al {period_max}", float(res["saldo_banco"])),
+        (7, f"Saldo S/FLEXXUS al {period_max}", float(res["saldo_flexxus"])),
+        (8, "DIFERENCIA INICIAL (extracto banco vs libro Flexxus)", "=B6-B7"),
+        (10, "Menos: INGRESOS registrados en FLEXXUS que NO están en el Banco", "=SUMIF('Flexxus no Banco'!D:D,\"PAV\",'Flexxus no Banco'!G:G)"),
+        (11, "Más: EGRESOS registrados en FLEXXUS que NO están en el Banco", "=SUM('Flexxus no Banco'!G:G)-B10"),
+        (12, "Más: INGRESOS en el Banco pero NO registrados en FLEXXUS", "=SUM('Banco ingresos no Flexxus'!H:H)"),
+        (13, "Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS", "=SUM('Banco egresos no Flexxus'!I:I)"),
+        (14, "Pendientes anteriores: incluidos dentro de los bloques anteriores (NO impacta como residual)", "=0"),
+        (16, f"SALDO FINAL S/FLEXXUS al {period_max}", "=B7"),
+        (17, "SALDO BANCO CALCULADO (= Flex - C1 + C2 + C3 - C4)", "=B7-B10+B11+B12-B13"),
+        (18, f"SALDO SEGÚN EXTRACTO BANCO al {period_max}", "=B6"),
+        (19, "DIFERENCIA FINAL (debe ser 0)", "=B18-B17"),
+        (20, "SALDO FLEXXUS AJUSTADO PARA CONCILIACIÓN BANCARIA (= Flex - C1 + C2)", "=B7-B10+B11"),
+        (21, "SALDO BANCO CALCULADO LUEGO DE TODOS LOS BLOQUES", "=B17"),
+        (22, "SALDO REAL EN FLEXXUS SEGÚN ARCHIVO ACTUAL / POST-IMPORT SI APLICA", "=B7"),
     ]
-    rn = 10
-    for label, val in rows_calc:
-        ws.cell(rn, 1, label).font = norm
-        c = ws.cell(rn, 2, float(val)); c.number_format = money_fmt
-        rn += 1
-    if abs(float(res.get("prev_open_effect", 0.0))) > 0.005:
-        ws.cell(rn, 1, "Más/Menos: PENDIENTES ANTERIORES AÚN ABIERTOS").font = norm
-        c = ws.cell(rn, 2, float(res.get("prev_open_effect", 0.0))); c.number_format = money_fmt
-        rn += 1
+    for row, label, val in resumen_rows:
+        ws.cell(row, 1, label).font = bold_f if row >= 16 or row in [19, 20, 21, 22] else norm
+        c = ws.cell(row, 2, val)
+        c.number_format = money_fmt
+        if row == 19:
+            c.fill = grn_fill if abs(float(res.get("diferencia", 0))) < 1.0 else red_fill
+            c.font = Font(bold=True, size=11, name="Calibri", color="375623" if abs(float(res.get("diferencia", 0))) < 1.0 else "C00000")
 
-    rn += 1
-    final_rows = [
-        (f"SALDO FINAL S/FLEXXUS al {period_max}", res["saldo_flexxus"]),
-        ("SALDO BANCO CALCULADO (= Flex − C1 + C2 + C3 − C4 ± pendientes anteriores)", res["calc_final"]),
-        (f"SALDO SEGÚN EXTRACTO BANCO al {period_max}", res["saldo_banco"]),
-        ("DIFERENCIA FINAL (debe ser 0)", res["diferencia"]),
-        ("SALDO FINAL FLEXXUS PASANDO LAS CONCILIACIONES", res["saldo_flexxus"] if res.get("mode") != "APERTURA" else res["saldo_flexxus"] - res["C1"]),
-        ("SALDO LUEGO DE PASAR TODO", res["saldo_banco"]),
+    ws.cell(23, 1, "Controles de consistencia interna").font = sub_f
+    hw(ws, 24, ["Control", "Fórmula / Resultado esperado", "Estado"])
+    controles = [
+        ("B10 = suma hoja Flexxus no Banco PAV", "=B10-SUMIF('Flexxus no Banco'!D:D,\"PAV\",'Flexxus no Banco'!G:G)", "Debe dar 0"),
+        ("B11 = suma hoja Flexxus no Banco egresos", "=B11-(SUM('Flexxus no Banco'!G:G)-B10)", "Debe dar 0"),
+        ("B12 = suma hoja Banco ingresos no Flexxus", "=B12-SUM('Banco ingresos no Flexxus'!H:H)", "Debe dar 0"),
+        ("B13 = suma hoja Banco egresos no Flexxus", "=B13-SUM('Banco egresos no Flexxus'!I:I)", "Debe dar 0"),
+        ("B14 no es residual de cierre", "=B14", "Debe dar 0"),
     ]
-    for label, val in final_rows:
-        ws.cell(rn, 1, label).font = bold_f if "SALDO" in label or "DIFERENCIA" in label else norm
-        c = ws.cell(rn, 2, float(val)); c.number_format = money_fmt
-        if "DIFERENCIA FINAL" in label:
-            c.fill = grn_fill if abs(float(val)) < 1.0 else red_fill
-            c.font = Font(bold=True, size=11, name="Calibri", color="375623" if abs(float(val)) < 1.0 else "C00000")
+    rn = 25
+    for ctrl, formula, estado in controles:
+        dw(ws, rn, [ctrl, formula, estado], mc=[2])
         rn += 1
 
     rn += 2
@@ -1843,69 +1865,61 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     hw(ws, rn + 1, ["Bloque", "Fecha", "Detalle / cuenta sugerida", "Cantidad", "Importe", "Observación"])
     rn += 2
 
+    cur_f = res["pendientes_proxima"]
+    pf_all = cur_f[cur_f["Origen"].astype(str).eq("FLEXXUS_NO_BANCO")] if not cur_f.empty else pd.DataFrame()
+    pbi_all = cur_f[(cur_f["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")) & (cur_f["SignoCalculo"].astype(float) > 0)] if not cur_f.empty else pd.DataFrame()
+    pbe_all = cur_f[(cur_f["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")) & (cur_f["SignoCalculo"].astype(float) < 0)] if not cur_f.empty else pd.DataFrame()
+
     ws.cell(rn, 1, "Menos: INGRESOS registrados en FLEXXUS que NO están en el Banco").font = bold_f
-    c = ws.cell(rn, 5, float(res["C1"])); c.number_format = money_fmt
+    ws.cell(rn, 5, "=B10").number_format = money_fmt
     rn += 1
-    cur_f = res["current_unmatched_f"]
-    cur_pav = cur_f[cur_f["Tipo"] == "PAV"] if not cur_f.empty and "Tipo" in cur_f.columns else pd.DataFrame()
-    if not cur_pav.empty:
-        for fecha, grp in cur_pav.groupby("FechaFlexxus"):
-            dw(ws, rn, ["Flexxus ingreso no banco", fecha, f"{len(grp)} PAV sin acreditar en banco", len(grp), float(grp["MontoFlexxus"].sum()), "Detalle en hoja Flexxus no Banco"], mc=[5])
-            rn += 1
+    if not pf_all.empty:
+        pav_all = pf_all[pf_all["TipoMovimiento"].astype(str).eq("PAV")]
+        if not pav_all.empty:
+            for fecha, grp in pav_all.groupby("FechaOrigen"):
+                dw(ws, rn, ["Flexxus ingreso no banco", fecha, f"{len(grp)} PAV sin acreditar en banco", len(grp), float(grp["Monto"].sum()), "Detalle en hoja Flexxus no Banco"], mc=[5])
+                rn += 1
 
     ws.cell(rn, 1, "Más: EGRESOS registrados en FLEXXUS que NO están en el Banco").font = bold_f
-    c = ws.cell(rn, 5, float(res["C2"])); c.number_format = money_fmt
+    ws.cell(rn, 5, "=B11").number_format = money_fmt
     rn += 1
-    cur_egr = cur_f[cur_f["Tipo"].isin(["MB-ENT-EX", "MB-EXT"])] if not cur_f.empty and "Tipo" in cur_f.columns else pd.DataFrame()
-    if not cur_egr.empty:
-        for _, f in cur_egr.iterrows():
-            dw(ws, rn, ["Flexxus egreso no banco", f["FechaFlexxus"], f"{f['Tipo']}: {str(f['Movimiento'])[:40]}", 1, float(f["MontoFlexxus"]), "Sin match bancario en el período"], mc=[5])
-            rn += 1
+    if not pf_all.empty:
+        fegr_all = pf_all[~pf_all["TipoMovimiento"].astype(str).eq("PAV")]
+        if not fegr_all.empty:
+            for _, f in fegr_all.iterrows():
+                dw(ws, rn, ["Flexxus egreso no banco", f.get("FechaOrigen", ""), f"{f.get('TipoMovimiento','')}: {str(f.get('Concepto',''))[:40]}", 1, float(f.get("Monto", 0.0)), f.get("Estado", "")], mc=[5])
+                rn += 1
 
     ws.cell(rn, 1, "Más: INGRESOS en el Banco pero NO registrados en FLEXXUS").font = bold_f
-    c = ws.cell(rn, 5, float(res["C3"])); c.number_format = money_fmt
+    ws.cell(rn, 5, "=B12").number_format = money_fmt
     rn += 1
-    cur_b = res["current_unmatched_b"]
-    cur_ing = cur_b[cur_b["EsIngreso"]] if not cur_b.empty and "EsIngreso" in cur_b.columns else pd.DataFrame()
-    if not cur_ing.empty:
-        for cat, grp in cur_ing.groupby("Categoria"):
+    if not pbi_all.empty:
+        for cat, grp in pbi_all.groupby("Categoria"):
             label = CAT_LABELS.get(cat, cat)
-            dw(ws, rn, ["Banco ingreso no Flexxus", "", label, len(grp), float(grp["ImporteAbs"].sum()), "Detalle en hoja Banco ingresos no Flexxus"], mc=[5])
+            dw(ws, rn, ["Banco ingreso no Flexxus", "", label, len(grp), float(grp["Monto"].sum()), "Detalle en hoja Banco ingresos no Flexxus"], mc=[5])
             rn += 1
 
     ws.cell(rn, 1, "Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS").font = bold_f
-    c = ws.cell(rn, 5, float(res["C4"])); c.number_format = money_fmt
+    ws.cell(rn, 5, "=B13").number_format = money_fmt
     rn += 1
-    cur_egr_b = cur_b[cur_b["EsEgreso"]] if not cur_b.empty and "EsEgreso" in cur_b.columns else pd.DataFrame()
-    if not cur_egr_b.empty:
-        for cat, grp in cur_egr_b.groupby("Categoria"):
+    if not pbe_all.empty:
+        for cat, grp in pbe_all.groupby("Categoria"):
             label = CAT_LABELS.get(cat, cat)
-            total_cat = float(grp["ImporteAbs"].sum())
+            total_cat = float(grp["Monto"].sum())
             obs = flexxus_copy_instruction(cat, total_cat, concepto=str(grp.iloc[0].get("Concepto", ""))) if cat in IMP_CATS else "Revisar según concepto antes de cargar"
             dw(ws, rn, ["Banco egreso no Flexxus", "", label, len(grp), total_cat, obs], mc=[5])
             rn += 1
 
-    if abs(float(res.get("prev_open_effect", 0.0))) > 0.005:
-        ws.cell(rn, 1, "Más/Menos: PENDIENTES ANTERIORES AÚN ABIERTOS").font = bold_f
-        c = ws.cell(rn, 5, float(res.get("prev_open_effect", 0.0))); c.number_format = money_fmt
-        rn += 1
-        if not res["prev_open"].empty:
-            for _, p in res["prev_open"].iterrows():
-                cat = str(p.get("Categoria", ""))
-                obs_base = "Arrastre individual abierto; no es ajuste genérico"
-                if str(p.get("Origen", "")) == "BANCO_NO_FLEXXUS" and float(p.get("SignoCalculo", 1)) < 0:
-                    obs = obs_base + " | " + flexxus_copy_instruction(cat, float(p.get("Monto", 0.0)), p.get("FechaOrigen", ""), p.get("Concepto", ""))
-                else:
-                    obs = obs_base
-                dw(ws, rn, ["Pendiente anterior abierto", p.get("FechaOrigen", ""), p.get("Concepto", ""), 1, float(p.get("Monto", 0.0)) * float(p.get("SignoCalculo", 1)), obs], mc=[5])
-                rn += 1
+    ws.cell(rn, 1, "Pendientes anteriores").font = bold_f
+    ws.cell(rn, 5, "=B14").number_format = money_fmt
+    dw(ws, rn + 1, ["Info", "", "Los pendientes anteriores abiertos están dentro de Flexxus no Banco, Banco ingresos no Flexxus o Banco egresos no Flexxus. No se usa residual.", "", 0, "No impacta el cierre"], mc=[5])
 
-    ws.column_dimensions["A"].width = 55
-    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["A"].width = 62
+    ws.column_dimensions["B"].width = 18
     ws.column_dimensions["C"].width = 45
     ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 16
-    ws.column_dimensions["F"].width = 35
+    ws.column_dimensions["E"].width = 18
+    ws.column_dimensions["F"].width = 45
 
     # HOJA 2: Resumen banco
     ws_rb = wb.create_sheet("Resumen banco")
@@ -1925,32 +1939,32 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     # HOJA 3: Flexxus no Banco
     ws3 = wb.create_sheet("Flexxus no Banco")
     ws3.cell(1, 1, "Detalle de movimientos registrados en Flexxus que no están acreditados en banco").font = sub_f
-    hw(ws3, 2, ["ID trazabilidad", "Fecha Flexxus", "Tipo", "Número", "Movimiento", "Monto", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia"])
+    hw(ws3, 2, ["ID trazabilidad", "Estado trazabilidad", "Fecha Flexxus", "Tipo", "Número", "Movimiento", "Monto", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia"])
     rn = 3
     if not pf.empty:
         for _, p in pf.iterrows():
             local, cupon, liq, monto_comp, dif = enrich_flexxus_pending_row(p)
-            dw(ws3, rn, [p.get("pending_id", ""), p.get("FechaOrigen", ""), p.get("TipoMovimiento", ""), p.get("Numero", ""), p.get("Concepto", ""), float(p.get("Monto", 0.0)), local, cupon, liq, monto_comp, dif], mc=[6, 10, 11])
+            dw(ws3, rn, [p.get("pending_id", ""), p.get("Estado", ""), p.get("FechaOrigen", ""), p.get("TipoMovimiento", ""), p.get("Numero", ""), p.get("Concepto", ""), float(p.get("Monto", 0.0)), local, cupon, liq, monto_comp, dif], mc=[7, 11, 12])
             rn += 1
     frz(ws3); aw(ws3)
 
     # HOJA 4: Banco ingresos no Flexxus
     ws4 = wb.create_sheet("Banco ingresos no Flexxus")
     ws4.cell(1, 1, "Detalle de ingresos del banco no registrados en Flexxus - con diagnóstico de origen").font = sub_f
-    hw(ws4, 2, ["ID trazabilidad", "Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Categoría", "Importe", "Saldo banco", "Origen detectado", "Archivo donde aparece", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia", "Diagnóstico", "Acción sugerida"])
+    hw(ws4, 2, ["ID trazabilidad", "Estado trazabilidad", "Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Categoría", "Importe", "Saldo banco", "Origen detectado", "Archivo donde aparece", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia", "Diagnóstico", "Acción sugerida"])
     rn = 3
     if not pbi.empty:
         for _, p in pbi.iterrows():
             cat = p.get("Categoria", "")
             cat_label = CAT_LABELS.get(cat, cat)
-            dw(ws4, rn, [p.get("pending_id", ""), "Banco ingreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cat_label, float(p.get("Monto", 0.0)), "", cat_label, p.get("Fuente", ""), "", "", "", "", "", "Ingreso bancario pendiente abierto", "Verificar si corresponde registrar como PAV o regularización"], mc=[7, 8])
+            dw(ws4, rn, [p.get("pending_id", ""), p.get("Estado", ""), "Banco ingreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cat_label, float(p.get("Monto", 0.0)), "", cat_label, p.get("Fuente", ""), "", "", "", "", "", "Ingreso bancario pendiente abierto", "Verificar si corresponde registrar como PAV o regularización"], mc=[8, 9])
             rn += 1
     frz(ws4); aw(ws4)
 
     # HOJA 5: Banco egresos no Flexxus
     ws5 = wb.create_sheet("Banco egresos no Flexxus")
     ws5.cell(1, 1, "Detalle de egresos del banco no registrados en Flexxus").font = sub_f
-    hw(ws5, 2, ["ID trazabilidad", "Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Cuenta / apertura sugerida", "Tratamiento", "Importe", "Saldo banco", "Acción"])
+    hw(ws5, 2, ["ID trazabilidad", "Estado trazabilidad", "Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Cuenta / apertura sugerida", "Tratamiento", "Importe", "Saldo banco", "Acción"])
     rn = 3
     if not pbe.empty:
         for _, p in pbe.iterrows():
@@ -1958,7 +1972,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             cuenta = CAT_LABELS.get(cat, cat)
             trat = "Retención de Ingresos Brutos" if cat == "RETENCION_IIBB" else ("Anticipo Impuesto a las Ganancias" if "25413" in cat else ("IVA crédito fiscal / revisar" if cat == "IVA" else "Revisar según concepto"))
             accion = flexxus_copy_instruction(cat, float(p.get("Monto", 0.0)), p.get("FechaOrigen", ""), p.get("Concepto", "")) if cat in IMP_CATS else "Registrar asiento / revisar según concepto"
-            dw(ws5, rn, [p.get("pending_id", ""), "Banco egreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cuenta, trat, float(p.get("Monto", 0.0)), "", accion], mc=[8, 9])
+            dw(ws5, rn, [p.get("pending_id", ""), p.get("Estado", ""), "Banco egreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cuenta, trat, float(p.get("Monto", 0.0)), "", accion], mc=[9, 10])
             rn += 1
     frz(ws5); aw(ws5)
 
@@ -2050,6 +2064,72 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             rn += 1
     frz(ws8); aw(ws8)
 
+
+    # HOJA 10: Control cobertura
+    ws_cov = wb.create_sheet("Control cobertura")
+    ws_cov.cell(1, 1, "Control de cobertura total: ninguna línea puede quedar en zona muerta").font = sub_f
+    hw(ws_cov, 2, ["Fuente", "Control", "Total fuente", "Total clasificado", "Diferencia", "Estado", "Observación"])
+
+    matched_bank = res.get("matched_bank", pd.DataFrame())
+    consumed_bank = res.get("consumed_prev_bank", pd.DataFrame())
+    matched_flex = res.get("matched_flex", pd.DataFrame())
+    consumed_flex = res.get("consumed_prev_flex", pd.DataFrame())
+
+    def df_sum(df, col, mask=None):
+        try:
+            if df is None or df.empty or col not in df.columns:
+                return 0.0
+            dd = df[mask] if mask is not None else df
+            if dd is None or dd.empty:
+                return 0.0
+            return float(dd[col].sum())
+        except Exception:
+            return 0.0
+
+    bank_ing_total = df_sum(bank, "ImporteAbs", bank["EsIngreso"] if (bank is not None and not bank.empty and "EsIngreso" in bank.columns) else None)
+    bank_egr_total = df_sum(bank, "ImporteAbs", bank["EsEgreso"] if (bank is not None and not bank.empty and "EsEgreso" in bank.columns) else None)
+    bank_ing_clas = df_sum(matched_bank, "ImporteAbs", matched_bank["EsIngreso"] if (matched_bank is not None and not matched_bank.empty and "EsIngreso" in matched_bank.columns) else None) + df_sum(consumed_bank, "ImporteAbs", consumed_bank["EsIngreso"] if (consumed_bank is not None and not consumed_bank.empty and "EsIngreso" in consumed_bank.columns) else None) + (float(pbi["Monto"].sum()) if pbi is not None and not pbi.empty else 0.0)
+    bank_egr_clas = df_sum(matched_bank, "ImporteAbs", matched_bank["EsEgreso"] if (matched_bank is not None and not matched_bank.empty and "EsEgreso" in matched_bank.columns) else None) + df_sum(consumed_bank, "ImporteAbs", consumed_bank["EsEgreso"] if (consumed_bank is not None and not consumed_bank.empty and "EsEgreso" in consumed_bank.columns) else None) + (float(pbe["Monto"].sum()) if pbe is not None and not pbe.empty else 0.0)
+
+    flex_pav_total = df_sum(flex, "MontoFlexxus", flex["Tipo"].astype(str).eq("PAV") if (flex is not None and not flex.empty and "Tipo" in flex.columns) else None)
+    flex_egr_total = df_sum(flex, "MontoFlexxus", flex["Tipo"].astype(str).isin(["MB-ENT-EX", "MB-EXT"]) if (flex is not None and not flex.empty and "Tipo" in flex.columns) else None)
+    flex_pav_clas = df_sum(matched_flex, "MontoFlexxus", matched_flex["Tipo"].astype(str).eq("PAV") if (matched_flex is not None and not matched_flex.empty and "Tipo" in matched_flex.columns) else None) + df_sum(consumed_flex, "MontoFlexxus", consumed_flex["Tipo"].astype(str).eq("PAV") if (consumed_flex is not None and not consumed_flex.empty and "Tipo" in consumed_flex.columns) else None) + (float(pf[pf["TipoMovimiento"].astype(str).eq("PAV")]["Monto"].sum()) if pf is not None and not pf.empty else 0.0)
+    flex_egr_clas = df_sum(matched_flex, "MontoFlexxus", matched_flex["Tipo"].astype(str).isin(["MB-ENT-EX", "MB-EXT"]) if (matched_flex is not None and not matched_flex.empty and "Tipo" in matched_flex.columns) else None) + df_sum(consumed_flex, "MontoFlexxus", consumed_flex["Tipo"].astype(str).isin(["MB-ENT-EX", "MB-EXT"]) if (consumed_flex is not None and not consumed_flex.empty and "Tipo" in consumed_flex.columns) else None) + (float(pf[~pf["TipoMovimiento"].astype(str).eq("PAV")]["Monto"].sum()) if pf is not None and not pf.empty else 0.0)
+
+    cov_rows = [
+        ("Banco", "Ingresos banco: real = conciliado + regularizado + Banco ingresos no Flexxus", bank_ing_total, bank_ing_clas),
+        ("Banco", "Egresos banco: real = conciliado + regularizado + Banco egresos no Flexxus", bank_egr_total, bank_egr_clas),
+        ("Flexxus", "PAV Flexxus: real = conciliado + regularizado + Flexxus no Banco", flex_pav_total, flex_pav_clas),
+        ("Flexxus", "Egresos Flexxus: real = conciliado + regularizado + Flexxus egresos no Banco", flex_egr_total, flex_egr_clas),
+    ]
+    rn_cov = 3
+    for fuente, control, total, clas in cov_rows:
+        diff = round(float(total) - float(clas), 2)
+        estado = "OK" if abs(diff) <= 1.0 else "ERROR"
+        obs = "Sin movimientos en zona muerta" if estado == "OK" else "Hay movimientos clasificados de forma incompleta; revisar detalle"
+        dw(ws_cov, rn_cov, [fuente, control, total, clas, diff, estado, obs], mc=[3,4,5])
+        if estado == "ERROR":
+            ws_cov.cell(rn_cov, 6).fill = red_fill
+            ws_cov.cell(rn_cov, 6).font = Font(bold=True, color="C00000")
+        else:
+            ws_cov.cell(rn_cov, 6).fill = grn_fill
+            ws_cov.cell(rn_cov, 6).font = Font(bold=True, color="375623")
+        rn_cov += 1
+
+    rn_cov += 2
+    ws_cov.cell(rn_cov, 1, "Movimientos bancarios pendientes visibles").font = sub_f
+    hw(ws_cov, rn_cov + 1, ["Fuente", "Fecha", "Comprobante/Número", "Concepto", "Importe", "Estado interno", "Diagnóstico"])
+    rn_cov += 2
+    try:
+        bank_unclassified = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"])].copy()
+        if not bank_unclassified.empty:
+            for _, b in bank_unclassified.iterrows():
+                dw(ws_cov, rn_cov, ["Banco", b.get("Fecha", ""), b.get("Comprobante", ""), b.get("Concepto", ""), float(b.get("ImporteAbs", 0.0)), "Pendiente visible en hojas Banco no Flexxus", b.get("Diagnostico", "")], mc=[5])
+                rn_cov += 1
+    except Exception:
+        pass
+    frz(ws_cov); aw(ws_cov, mx=70)
+
     # HOJA 10: Notas proceso
     ws_n = wb.create_sheet("Notas proceso")
     hw(ws_n, 1, ["Tema", "Detalle"])
@@ -2061,7 +2141,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Local", "Locales: " + ", ".join([f"{k}={v}" for k, v in LOCAL_MAP.items()])),
         ("Pedidos Ya", "PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación."),
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
-        ("V4.7", "Completa columnas auxiliares en Flexxus no Banco y agrega instrucciones copiables para cargar impuestos/gastos en Flexxus con textos detectables en la próxima conciliación."),
+        ("V5.3", "Excel con fórmulas reales, B14 sin impacto residual, saldos separados y hoja Control cobertura para evitar movimientos en zona muerta."),
     ]
     for i, (t, d) in enumerate(notas, 2):
         ws_n.cell(i, 1, t).font = bold_f
@@ -2110,7 +2190,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.0-ID-UNICO-LETRA-SECUENCIA-TRAZABILIDAD-2026-04-30"
+APP_VERSION = "V5.3-AUDITORIA-COBERTURA-REPETIDOS-SIN-ZONA-MUERTA-2026-04-30"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -2123,7 +2203,7 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.0</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.3</div>
       <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
@@ -2533,9 +2613,9 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V5.0", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_0.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.3", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_3.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_0.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_3.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
