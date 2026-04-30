@@ -1,5 +1,6 @@
 # app.py
-# Versión estable V5.6: conciliación bancaria continua Grupo Dancona.
+# Versión estable V5.8 FINAL: conciliación bancaria continua Grupo Dancona.
+# Separa saldo Flexxus real, saldo ajustado conciliatorio y total importado .xls.
 # Integra login, historial, administrador de archivos, diagnóstico/reset,
 # conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
 # matching agregado MB-EXT/PAV-QR, Pedidos Ya y exportación Flexxus.
@@ -42,7 +43,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V5.6",
+    page_title="Conciliación Bancaria Dancona · V5.8",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1964,32 +1965,34 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         (12, "Más: INGRESOS en el Banco pero NO registrados en FLEXXUS", "=SUM('Banco ingresos no Flexxus'!H:H)"),
         (13, "Menos: EGRESOS en el Banco pero NO registrados en FLEXXUS", "=SUM('Banco egresos no Flexxus'!I:I)"),
         (14, "Pendientes anteriores: incluidos dentro de los bloques anteriores (NO impacta como residual)", "=0"),
-        (16, f"SALDO FINAL S/FLEXXUS al {period_max}", "=B7"),
-        (17, "SALDO BANCO CALCULADO (= Flex - C1 + C2 + C3 - C4)", "=B7-B10+B11+B12-B13"),
-        (18, f"SALDO SEGÚN EXTRACTO BANCO al {period_max}", "=B6"),
-        (19, "DIFERENCIA FINAL (debe ser 0)", "=B18-B17"),
-        (20, "SALDO FLEXXUS AJUSTADO PARA CONCILIACIÓN BANCARIA (= Flex - C1 + C2)", "=B7-B10+B11"),
-        (21, "SALDO BANCO CALCULADO LUEGO DE TODOS LOS BLOQUES", "=B17"),
-        (22, "SALDO REAL EN FLEXXUS SEGÚN ARCHIVO ACTUAL / POST-IMPORT SI APLICA", "=B7"),
+        (16, f"SALDO REAL S/FLEXXUS SEGÚN ARCHIVO ACTUAL al {period_max}", "=B7"),
+        (17, "SALDO FLEXXUS AJUSTADO PARA CONCILIACIÓN BANCARIA (= Flex - C1 + C2)", "=B7-B10+B11"),
+        (18, "TOTAL MOVIMIENTOS CONCILIADOS / .XLS A IMPORTAR", "='Carga Flexxus'!C5"),
+        (19, "SALDO BANCO CALCULADO (= Flex - C1 + C2 + C3 - C4)", "=B7-B10+B11+B12-B13"),
+        (20, f"SALDO SEGÚN EXTRACTO BANCO al {period_max}", "=B6"),
+        (21, "DIFERENCIA FINAL (debe ser 0)", "=B20-B19"),
+        (22, "SALDO REAL EN FLEXXUS LUEGO DE IMPORTAR / POST-IMPORT SI APLICA", "=B7"),
+        (23, "ACLARACIÓN: B17 es saldo ajustado conciliatorio, no saldo final real", "=B17"),
     ]
     for row, label, val in resumen_rows:
-        ws.cell(row, 1, label).font = bold_f if row >= 16 or row in [19, 20, 21, 22] else norm
+        ws.cell(row, 1, label).font = bold_f if row >= 16 or row in [21] else norm
         c = ws.cell(row, 2, val)
         c.number_format = money_fmt
-        if row == 19:
+        if row == 21:
             c.fill = grn_fill if abs(float(res.get("diferencia", 0))) < 1.0 else red_fill
             c.font = Font(bold=True, size=11, name="Calibri", color="375623" if abs(float(res.get("diferencia", 0))) < 1.0 else "C00000")
 
-    ws.cell(23, 1, "Controles de consistencia interna").font = sub_f
-    hw(ws, 24, ["Control", "Fórmula / Resultado esperado", "Estado"])
+    ws.cell(25, 1, "Controles de consistencia interna").font = sub_f
+    hw(ws, 26, ["Control", "Fórmula / Resultado esperado", "Estado"])
     controles = [
         ("B10 = suma hoja Flexxus no Banco PAV", "=B10-SUMIF('Flexxus no Banco'!D:D,\"PAV\",'Flexxus no Banco'!G:G)", "Debe dar 0"),
         ("B11 = suma hoja Flexxus no Banco egresos", "=B11-(SUM('Flexxus no Banco'!G:G)-B10)", "Debe dar 0"),
         ("B12 = suma hoja Banco ingresos no Flexxus", "=B12-SUM('Banco ingresos no Flexxus'!H:H)", "Debe dar 0"),
         ("B13 = suma hoja Banco egresos no Flexxus", "=B13-SUM('Banco egresos no Flexxus'!I:I)", "Debe dar 0"),
         ("B14 no es residual de cierre", "=B14", "Debe dar 0"),
+        ("B18 = total hoja Carga Flexxus", "=B18-'Carga Flexxus'!C5", "Debe dar 0"),
     ]
-    rn = 25
+    rn = 27
     for ctrl, formula, estado in controles:
         dw(ws, rn, [ctrl, formula, estado], mc=[2])
         rn += 1
@@ -2360,6 +2363,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Local", "Locales: " + ", ".join([f"{k}={v}" for k, v in LOCAL_MAP.items()])),
         ("Pedidos Ya", "PEDIDOS YA es cliente/canal aparte, no tarjeta ni QR; no completar cupón QR ni liquidación."),
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
+        ("V5.8", "Versión final: separa saldo Flexxus real, saldo Flexxus ajustado para conciliación y total importado .xls; mantiene fórmulas reales y control de cobertura."),
         ("V5.6", "Separa pendientes reales abiertos de movimientos ya procesados/históricos en la pantalla principal y en el conteo del historial."),
         ("V5.5", "Corrige identificación de local/liquidación en Banco ingresos no Flexxus: usa TRX exacto, QR PCT y fallback por comprobante banco=código de comercio."),
     ]
@@ -2410,7 +2414,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.6-PENDIENTES-REALES-PROCESADOS-SEPARADOS-2026-04-30"
+APP_VERSION = "V5.8-FINAL-SALDOS-SEPARADOS-FORMULAS-COBERTURA-2026-04-30"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -2423,7 +2427,7 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.6</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.8</div>
       <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
@@ -2854,9 +2858,9 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V5.6", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.8", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_8.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_6.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_8.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
