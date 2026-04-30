@@ -1,5 +1,8 @@
-# app_conciliacion_dancona_v2.py
-# Versión estable V4,7: conciliación continua, pendientes anteriores, regularizaciones, apertura y matching agregado MB-EXT.
+# app.py
+# Versión estable V5.0: conciliación bancaria continua Grupo Dancona.
+# Integra login, historial, administrador de archivos, diagnóstico/reset,
+# conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
+# matching agregado MB-EXT/PAV-QR, Pedidos Ya y exportación Flexxus.
 # Streamlit Cloud requirements sugeridos:
 # streamlit
 # pandas
@@ -39,7 +42,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V4.7",
+    page_title="Conciliación Bancaria Dancona · V5.0",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -80,6 +83,42 @@ CAT_LABELS = {
     "OTRO": "Otro",
     "AJUSTE_MENOR_REDONDEO": "Ajuste menor redondeo/extracto",
 }
+
+def normalize_category_code(value: str) -> str:
+    """Convierte etiquetas visibles del Excel anterior a códigos internos estables."""
+    c = norm_txt(value)
+    compact = re.sub(r"[^A-Z0-9]", "", c)
+    if not c:
+        return "OTRO"
+    if c in CAT_LABELS:
+        return c
+    if "CR DEBIN SPOT" in c or compact == "QR" or "QRCRDEBINSPOT" in compact:
+        return "QR"
+    if "LIQUIDACIONTARJETA" in compact or "TARJETA" in compact:
+        return "LIQUIDACION_TARJETA"
+    if "DEBITOLIQUIDACIONTARJETA" in compact or "DEBLIQ" in compact or "MASTERCARD" in compact:
+        return "DEBITO_LIQ_TARJETA"
+    if "TRANSFERENCIAENTRANTE" in compact:
+        return "TRANSFERENCIA_ENTRANTE"
+    if "TRANSFERENCIASALIENTE" in compact:
+        return "TRANSFERENCIA_SALIENTE"
+    if "INGRESOSBRUTOS" in compact or "IIBB" in compact or "RETENCIONINGRESOSBRUTOS" in compact:
+        return "RETENCION_IIBB"
+    if "25413" in compact and ("DEB" in compact or "DEBITO" in compact):
+        return "IMPUESTO_LEY25413_DEB"
+    if "25413" in compact and ("CRED" in compact or "CREDIT" in compact or "CRE" in compact):
+        return "IMPUESTO_LEY25413_CRED"
+    if compact.startswith("IVA") or "IVABASE" in compact:
+        return "IVA"
+    if "GASTO" in compact or "COMTRANSFE" in compact or "COMISION" in compact:
+        return "GASTO_BANCARIO"
+    if "PAGODIRECTO" in compact:
+        return "DEBITO_PAGO_DIRECTO"
+    if "AJUSTEMENOR" in compact or "REDONDEO" in compact:
+        return "AJUSTE_MENOR_REDONDEO"
+    if "PAV" in compact:
+        return "PAV"
+    return str(value).strip() or "OTRO"
 
 # =============================================================================
 # UTILIDADES
@@ -349,12 +388,99 @@ def parse_trx(file) -> pd.DataFrame:
 # =============================================================================
 
 def _find_header_row(df: pd.DataFrame, required_any: List[str]) -> Optional[int]:
-    for i in range(min(len(df), 20)):
+    required = [norm_txt(r) for r in required_any]
+    for i in range(min(len(df), 25)):
         row_txt = " | ".join(norm_txt(x) for x in df.iloc[i].tolist())
-        if any(norm_txt(r) in row_txt for r in required_any):
+        if "FECHA FLEXXUS" in required:
+            if "FECHA FLEXXUS" in row_txt and "MOVIMIENTO" in row_txt and ("MONTO" in row_txt or "IMPORTE" in row_txt):
+                return i
+            continue
+        if "FECHA BANCO" in required:
+            if "FECHA BANCO" in row_txt and "CONCEPTO BANCO" in row_txt and "IMPORTE" in row_txt:
+                return i
+            continue
+        if "TIPO PENDIENTE" in required:
+            if ("TIPO PENDIENTE" in row_txt or "ORIGEN" in row_txt) and ("MONTO" in row_txt or "IMPORTE" in row_txt):
+                return i
+            continue
+        if all(r in row_txt for r in required):
             return i
     return None
 
+
+def stable_pending_id(origen: str, fecha: str, tipo: str, numero: str, concepto: str, categoria: str, monto: float) -> str:
+    """ID base determinístico para trazabilidad.
+
+    V5.0: el ID final visible no queda solo en este hash. Luego
+    assign_stable_pending_ids agrega una LETRA + secuencia de ocurrencia
+    (-A001, -B002, etc.) para evitar duplicados incluso cuando Banco Nación
+    trae dos líneas con misma fecha, comprobante, concepto e importe.
+    """
+    import hashlib
+    cents = int(round(abs(float(monto or 0)) * 100))
+    raw = "|".join([
+        norm_txt(origen), norm_txt(fecha), norm_txt(tipo), norm_txt(numero),
+        norm_txt(concepto), norm_txt(categoria), str(cents)
+    ])
+    return "PEND-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
+
+def _trace_letter(n: int) -> str:
+    """Convierte 1->A, 2->B ... 26->Z, 27->AA para sufijos visibles."""
+    n = int(n)
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters or "A"
+
+def make_trace_id(base_id: str, occurrence: int) -> str:
+    """ID final único y legible: PEND-XXXXXXXXXXXX-A001."""
+    occurrence = max(1, int(occurrence))
+    return f"{base_id}-{_trace_letter(occurrence)}{occurrence:03d}"
+
+def assign_stable_pending_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """Asigna IDs únicos visibles por movimiento.
+
+    Conserva IDs V5 ya existentes si vienen de una conciliación anterior.
+    Para registros nuevos calcula un ID base determinístico y agrega una letra
+    + secuencia de ocurrencia. Esto evita colisiones en líneas bancarias
+    idénticas y hace que cada pendiente sea individualmente trazable.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    # Si el archivo anterior ya trae IDs V5 únicos, se respetan.
+    if "pending_id" in out.columns:
+        existing = out["pending_id"].fillna("").astype(str)
+        if existing.str.match(r"^PEND-[A-F0-9]{12}-[A-Z]+\d{3}$").all() and existing.is_unique:
+            return out
+
+    base_ids = []
+    for _, r in out.iterrows():
+        base_ids.append(stable_pending_id(
+            r.get("Origen", ""), r.get("FechaOrigen", ""), r.get("TipoMovimiento", ""),
+            r.get("Numero", ""), r.get("Concepto", ""), r.get("Categoria", ""), r.get("Monto", 0)
+        ))
+
+    seen = {}
+    final_ids = []
+    for base in base_ids:
+        seen[base] = seen.get(base, 0) + 1
+        final_ids.append(make_trace_id(base, seen[base]))
+
+    # Defensa adicional: si por algún motivo quedara repetido, agrega sufijo X#### por posición.
+    counts = {}
+    unique_ids = []
+    for i, pid in enumerate(final_ids, start=1):
+        counts[pid] = counts.get(pid, 0) + 1
+        if counts[pid] == 1:
+            unique_ids.append(pid)
+        else:
+            unique_ids.append(f"{pid}-X{i:04d}")
+
+    out["pending_id"] = unique_ids
+    return out
 
 def parse_previous_conciliation(file) -> Tuple[pd.DataFrame, Dict[str, float], str]:
     """Lee conciliación anterior nueva o vieja.
@@ -498,12 +624,120 @@ def parse_previous_conciliation(file) -> Tuple[pd.DataFrame, Dict[str, float], s
                         "Fuente": "Banco egresos no Flexxus anterior",
                     })
 
+
+    # Formato V4.8: movimientos ya procesados/importados en la conciliación anterior.
+    # Sirve para reprocesos del mismo extracto: si el movimiento ya estuvo en "Carga Flexxus"
+    # o en "Regularizaciones", no debe volver a entrar como C1/C2 corriente.
+    if "Carga Flexxus" in xl.sheet_names:
+        try:
+            raw = pd.read_excel(file, sheet_name="Carga Flexxus", header=None, dtype=str)
+            h = _find_header_row(raw, ["Fecha mov. Flexxus", "Nro. Flexxus", "Monto"])
+            if h is not None:
+                cf = pd.read_excel(file, sheet_name="Carga Flexxus", header=h, dtype=str)
+                for _, r in cf.iterrows():
+                    tipo = str(r.get("Tipo", "")).strip()
+                    numero = str(r.get("Nro. Flexxus", r.get("Número", ""))).strip()
+                    monto = parse_ar_num(r.get("Monto", 0))
+                    fecha = str(r.get("Fecha mov. Flexxus", "")).strip()
+                    if tipo in {"PAV", "MB-ENT-EX", "MB-EXT"} and numero and abs(monto) > 0.005:
+                        pendings.append({
+                            "pending_id": stable_pending_id("FLEXXUS_PROCESADO_ANTERIOR", fecha, tipo, numero, "", "PROCESADO_ANTERIOR", monto),
+                            "FechaOrigen": fecha,
+                            "Origen": "FLEXXUS_PROCESADO_ANTERIOR",
+                            "TipoPendiente": "FLEXXUS_PROCESADO_ANTERIOR",
+                            "TipoMovimiento": tipo,
+                            "Numero": numero,
+                            "Concepto": "Movimiento ya incluido en Carga Flexxus anterior",
+                            "Categoria": "PROCESADO_ANTERIOR",
+                            "Monto": abs(monto),
+                            "SignoCalculo": 0,
+                            "Estado": "PROCESADO_ANTERIOR",
+                            "Fuente": "Carga Flexxus anterior",
+                        })
+                        banco_fecha = str(r.get("Fecha banco real", r.get("Fecha banco", ""))).strip()
+                        banco_comp = str(r.get("Comprobante banco", "")).strip()
+                        banco_conc = str(r.get("Concepto banco", "")).strip()
+                        if banco_conc or banco_comp:
+                            pendings.append({
+                                "pending_id": stable_pending_id("BANCO_PROCESADO_ANTERIOR", banco_fecha, tipo, banco_comp, banco_conc, classify_bank(banco_conc), monto),
+                                "FechaOrigen": banco_fecha,
+                                "Origen": "BANCO_PROCESADO_ANTERIOR",
+                                "TipoPendiente": "BANCO_PROCESADO_ANTERIOR",
+                                "TipoMovimiento": tipo,
+                                "Numero": banco_comp,
+                                "Concepto": banco_conc,
+                                "Categoria": classify_bank(banco_conc),
+                                "Monto": abs(monto),
+                                "SignoCalculo": 0,
+                                "Estado": "PROCESADO_ANTERIOR",
+                                "Fuente": "Banco usado en Carga Flexxus anterior",
+                            })
+        except Exception:
+            pass
+
+    if "Regularizaciones" in xl.sheet_names:
+        try:
+            raw = pd.read_excel(file, sheet_name="Regularizaciones", header=None, dtype=str)
+            h = _find_header_row(raw, ["Fecha Flexxus", "Tipo", "Número", "Importe"])
+            if h is not None:
+                rg = pd.read_excel(file, sheet_name="Regularizaciones", header=h, dtype=str)
+                for _, r in rg.iterrows():
+                    tipo = str(r.get("Tipo", "")).strip()
+                    numero = str(r.get("Número", r.get("Numero", ""))).strip()
+                    mov = str(r.get("Movimiento", "")).strip()
+                    monto = parse_ar_num(r.get("Importe", r.get("Monto", 0)))
+                    fecha = str(r.get("Fecha Flexxus", r.get("Fecha", ""))).strip()
+                    if tipo in {"PAV", "MB-ENT-EX", "MB-EXT"} and numero and abs(monto) > 0.005:
+                        pendings.append({
+                            "pending_id": stable_pending_id("FLEXXUS_PROCESADO_ANTERIOR", fecha, tipo, numero, mov, "PROCESADO_ANTERIOR", monto),
+                            "FechaOrigen": fecha,
+                            "Origen": "FLEXXUS_PROCESADO_ANTERIOR",
+                            "TipoPendiente": "FLEXXUS_PROCESADO_ANTERIOR",
+                            "TipoMovimiento": tipo,
+                            "Numero": numero,
+                            "Concepto": mov or "Movimiento ya incluido en Regularizaciones anteriores",
+                            "Categoria": "PROCESADO_ANTERIOR",
+                            "Monto": abs(monto),
+                            "SignoCalculo": 0,
+                            "Estado": "PROCESADO_ANTERIOR",
+                            "Fuente": "Regularizaciones anteriores",
+                        })
+        except Exception:
+            pass
+
+
+
+    # Si la conciliación anterior cerró con diferencia distinta de cero, no se descarta:
+    # se arrastra explícitamente como pendiente técnico anterior con ID estable.
+    # Esto evita perder trazabilidad cuando una versión anterior cerró mal (ej. V4.7 tercer registro).
+    try:
+        prev_diff = float(prev.get("diferencia_final_anterior", 0) or 0)
+        if abs(prev_diff) > 1.0:
+            pendings.append({
+                "pending_id": stable_pending_id("DIFERENCIA_FINAL_ANTERIOR", "", "", "DIF_ANT", "Diferencia final anterior abierta", "DIFERENCIA_FINAL_ANTERIOR", prev_diff),
+                "FechaOrigen": "",
+                "Origen": "DIFERENCIA_FINAL_ANTERIOR",
+                "TipoPendiente": "DIFERENCIA_FINAL_ANTERIOR",
+                "TipoMovimiento": "",
+                "Numero": "DIF_ANT",
+                "Concepto": "Diferencia final de la conciliación anterior aún abierta",
+                "Categoria": "DIFERENCIA_FINAL_ANTERIOR",
+                "Monto": abs(prev_diff),
+                "SignoCalculo": 1 if prev_diff > 0 else -1,
+                "Estado": "ABIERTO_ANTERIOR",
+                "Fuente": "Diferencia final anterior explícita",
+            })
+    except Exception:
+        pass
+
+
     out = pd.DataFrame(pendings)
     if out.empty:
         out = pd.DataFrame(columns=[
             "pending_id", "FechaOrigen", "Origen", "TipoPendiente", "TipoMovimiento",
             "Numero", "Concepto", "Categoria", "Monto", "SignoCalculo", "Estado", "Fuente"
         ])
+    out = assign_stable_pending_ids(out)
     return out, prev, mode
 
 
@@ -613,7 +847,7 @@ def build_continuity_control(prev_summary: Dict[str, float], bank: pd.DataFrame)
     if not prev_bank:
         return {"aplica": False, "mensaje": "Sin saldo banco anterior leído para validar continuidad."}
     diff = round(opening - prev_bank, 2)
-    ok = abs(diff) <= 5.0
+    ok = abs(diff) <= 10.0
     return {
         "aplica": True,
         "saldo_banco_cierre_anterior": prev_bank,
@@ -631,21 +865,120 @@ def build_continuity_control(prev_summary: Dict[str, float], bank: pd.DataFrame)
 # MOTOR DE MATCHING
 # =============================================================================
 
-def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: pd.DataFrame, prev_summary: Optional[Dict[str, float]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Cancela pendientes anteriores contra movimientos actuales.
 
     V3 agrega matching agregado: una MB-EXT consolidada puede regularizar varias
     líneas pendientes anteriores de Banco no Flexxus de la misma categoría.
     """
     regs = []
+    flex.attrs["has_previous_conciliation"] = not prev_open.empty
     if prev_open.empty:
         return prev_open.copy(), flex, bank, pd.DataFrame(regs)
 
     prev = prev_open.copy().reset_index(drop=True)
+    prev_bank_final = float((prev_summary or {}).get("saldo_banco_anterior", 0) or 0)
+    current_bank_final = get_saldo_banco_final(bank)
+    is_reprocess_same_extract = bool(prev_bank_final and abs(prev_bank_final - current_bank_final) <= 10.0)
+    flex.attrs["is_reprocess_same_extract"] = is_reprocess_same_extract
+    bank.attrs["is_reprocess_same_extract"] = is_reprocess_same_extract
+
+    processed_prev = prev[prev.get("Origen", "").astype(str).eq("FLEXXUS_PROCESADO_ANTERIOR")].copy() if ("Origen" in prev.columns and is_reprocess_same_extract) else pd.DataFrame()
+    if not processed_prev.empty:
+        for _, p in processed_prev.iterrows():
+            tipo = str(p.get("TipoMovimiento", ""))
+            numero = str(p.get("Numero", ""))
+            monto = float(p.get("Monto", 0.0) or 0.0)
+            candidates = flex[
+                (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
+                (flex["Tipo"].astype(str).eq(tipo)) &
+                (flex["Numero"].astype(str).eq(numero)) &
+                (flex["MontoFlexxus"].apply(lambda x: amount_exact(x, monto, tol=0.05)))
+            ].copy()
+            if not candidates.empty:
+                fidx = candidates.index[0]
+                flex.loc[fidx, "ConsumedPrev"] = True
+                flex.loc[fidx, "MatchStage"] = "YA_PROCESADO_ANTERIOR"
+                flex.loc[fidx, "MatchRef"] = p.get("pending_id", "")
+                flex.loc[fidx, "Diagnostico"] = "Movimiento ya incluido en conciliación anterior; no entra como pendiente corriente"
+        prev = prev[~prev.get("Origen", "").astype(str).eq("FLEXXUS_PROCESADO_ANTERIOR")].reset_index(drop=True)
+
+    processed_bank_prev = prev[prev.get("Origen", "").astype(str).eq("BANCO_PROCESADO_ANTERIOR")].copy() if ("Origen" in prev.columns and is_reprocess_same_extract) else pd.DataFrame()
+    if not processed_bank_prev.empty:
+        for _, p in processed_bank_prev.iterrows():
+            monto = float(p.get("Monto", 0.0) or 0.0)
+            comp = str(p.get("Numero", ""))
+            cat = str(p.get("Categoria", ""))
+            candidates = bank[
+                (~bank["Matched"]) & (~bank["ConsumedPrev"]) &
+                (bank["ImporteAbs"].apply(lambda x: amount_exact(x, monto, tol=0.05)))
+            ].copy()
+            if comp:
+                exact_comp = candidates[candidates["Comprobante"].astype(str).eq(comp)]
+                if not exact_comp.empty:
+                    candidates = exact_comp
+            if cat:
+                same_cat = candidates[candidates["Categoria"].astype(str).eq(cat)]
+                if not same_cat.empty:
+                    candidates = same_cat
+            if not candidates.empty:
+                bidx = candidates.index[0]
+                bank.loc[bidx, "ConsumedPrev"] = True
+                bank.loc[bidx, "MatchStage"] = "BANCO_YA_PROCESADO_ANTERIOR"
+                bank.loc[bidx, "MatchRef"] = p.get("pending_id", "")
+                bank.loc[bidx, "Diagnostico"] = "Movimiento bancario ya usado en conciliación anterior; no entra como C3/C4 corriente"
+        prev = prev[~prev.get("Origen", "").astype(str).eq("BANCO_PROCESADO_ANTERIOR")].reset_index(drop=True)
+
     prev["Regularizado"] = False
     prev["RegularizadoCon"] = ""
     prev["FechaRegularizacion"] = ""
     prev["Diagnostico"] = "Pendiente anterior abierto"
+
+    # V4.9: regulariza Pedidos Ya pendiente anterior contra transferencia entrante actual.
+    # Se hace por concepto + categoría bancaria + tolerancia chica, no por QR/tarjeta.
+    pedidos_prev_idx = prev[
+        (~prev["Regularizado"]) &
+        (prev["Origen"].astype(str).eq("FLEXXUS_NO_BANCO")) &
+        (prev["SignoCalculo"].astype(float) < 0) &
+        (prev["Concepto"].astype(str).apply(lambda x: "PEDIDOS YA" in norm_txt(x)))
+    ].index.tolist()
+    for pidx in pedidos_prev_idx:
+        monto = float(prev.loc[pidx, "Monto"])
+        candidates = bank[
+            (~bank["Matched"]) & (~bank["ConsumedPrev"]) &
+            (bank["EsIngreso"]) &
+            (bank["Categoria"].astype(str).eq("TRANSFERENCIA_ENTRANTE")) &
+            (bank["ImporteAbs"].apply(lambda x: abs(float(x) - monto) <= 1.00))
+        ].copy()
+        if candidates.empty:
+            continue
+        candidates["date_diff"] = (candidates["Fecha_dt"] - safe_date(prev.loc[pidx, "FechaOrigen"])).abs()
+        bidx = candidates.sort_values(["date_diff", "row_id"]).index[0]
+        diff_py = round(float(bank.loc[bidx, "ImporteAbs"]) - monto, 2)
+        bank.loc[bidx, "ConsumedPrev"] = True
+        bank.loc[bidx, "MatchStage"] = "REGULARIZACION_ANTERIOR_PEDIDOSYA"
+        bank.loc[bidx, "MatchRef"] = prev.loc[pidx, "pending_id"]
+        bank.loc[bidx, "Diagnostico"] = f"Regulariza Pedidos Ya anterior; diferencia redondeo {diff_py:.2f}. No QR/no tarjeta"
+        prev.loc[pidx, "Regularizado"] = True
+        prev.loc[pidx, "RegularizadoCon"] = bank.loc[bidx, "row_id"]
+        prev.loc[pidx, "FechaRegularizacion"] = bank.loc[bidx, "Fecha"]
+        prev.loc[pidx, "Diagnostico"] = "Regularizado con transferencia entrante Pedidos Ya actual"
+        regs.append({
+            "ID pendiente": prev.loc[pidx, "pending_id"],
+            "Fecha origen": prev.loc[pidx, "FechaOrigen"],
+            "Origen pendiente": prev.loc[pidx, "TipoPendiente"],
+            "Concepto pendiente": prev.loc[pidx, "Concepto"],
+            "Categoría pendiente": prev.loc[pidx, "Categoria"],
+            "Monto pendiente": monto,
+            "Regularizado con": "Banco",
+            "Fecha regularización": bank.loc[bidx, "Fecha"],
+            "Tipo actual": "TRANSFERENCIA_ENTRANTE",
+            "Referencia actual": bank.loc[bidx, "Comprobante"],
+            "Concepto actual": bank.loc[bidx, "Concepto"],
+            "Monto actual": float(bank.loc[bidx, "ImporteAbs"]),
+            "Diferencia": diff_py,
+            "Diagnóstico": "Regularización Pedidos Ya anterior contra transferencia entrante; sin QR ni tarjeta",
+        })
 
     # 1) Matching agregado de MB-EXT actual contra múltiples pendientes bancarios anteriores.
     mbext_idx = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & (flex["Tipo"] == "MB-EXT")].index.tolist()
@@ -750,6 +1083,44 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
                 prev.loc[pidx, "Diagnostico"] = "Regularizado con Banco actual"
                 regs.append(build_reg_row(p, "Banco", bank.loc[best_idx].to_dict(), "Regulariza Flexxus no Banco anterior"))
                 continue
+
+    # 3) Si un pendiente anterior sigue apareciendo igual en el archivo actual,
+    # no es nuevo C1/C3/C4: se marca como arrastre del mismo pendiente.
+    for pidx, p in prev.iterrows():
+        if bool(p.get("Regularizado", False)):
+            continue
+        monto = float(p.get("Monto", 0.0) or 0.0)
+        origen = str(p.get("Origen", ""))
+        fecha = str(p.get("FechaOrigen", ""))
+        numero = str(p.get("Numero", ""))
+        concepto = norm_txt(p.get("Concepto", ""))
+        if origen == "FLEXXUS_NO_BANCO":
+            cand = flex[(~flex["Matched"]) & (~flex["ConsumedPrev"]) & flex["MontoFlexxus"].apply(lambda x: amount_exact(x, monto, tol=0.05))].copy()
+            if numero:
+                cand_num = cand[cand["Numero"].astype(str).eq(numero)]
+                if not cand_num.empty:
+                    cand = cand_num
+            if not cand.empty:
+                cand["same_date"] = cand["FechaFlexxus"].astype(str).eq(fecha).astype(int)
+                best_idx = cand.sort_values(["same_date", "row_id"], ascending=[False, True]).index[0]
+                flex.loc[best_idx, "ConsumedPrev"] = True
+                flex.loc[best_idx, "MatchStage"] = "PENDIENTE_ANTERIOR_REPETIDO"
+                flex.loc[best_idx, "MatchRef"] = p.get("pending_id", "")
+                flex.loc[best_idx, "Diagnostico"] = "Sigue abierto desde conciliación anterior; no se cuenta como C1 nuevo"
+        elif origen == "BANCO_NO_FLEXXUS":
+            cand = bank[(~bank["Matched"]) & (~bank["ConsumedPrev"]) & bank["ImporteAbs"].apply(lambda x: amount_exact(x, monto, tol=0.05))].copy()
+            if numero:
+                cand_num = cand[cand["Comprobante"].astype(str).eq(numero)]
+                if not cand_num.empty:
+                    cand = cand_num
+            if not cand.empty:
+                cand["same_date"] = cand["Fecha"].astype(str).eq(fecha).astype(int)
+                cand["same_concept"] = cand["ConceptoNorm"].astype(str).eq(concepto).astype(int)
+                best_idx = cand.sort_values(["same_date", "same_concept", "row_id"], ascending=[False, False, True]).index[0]
+                bank.loc[best_idx, "ConsumedPrev"] = True
+                bank.loc[best_idx, "MatchStage"] = "PENDIENTE_ANTERIOR_REPETIDO"
+                bank.loc[best_idx, "MatchRef"] = p.get("pending_id", "")
+                bank.loc[best_idx, "Diagnostico"] = "Sigue abierto desde conciliación anterior; no se cuenta como C3/C4 nuevo"
 
     regs_df = pd.DataFrame(regs)
     return prev, flex, bank, regs_df
@@ -978,6 +1349,23 @@ def match_pedidosya_current(flex: pd.DataFrame, bank: pd.DataFrame) -> Tuple[pd.
 
 def match_current(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Matchea movimientos corrientes Flexxus vs banco, sin tocar regularizaciones anteriores."""
+    # V4.8: si el archivo actual contiene movimientos Flexxus con fecha anterior
+    # al primer movimiento bancario del extracto actual, se consideran filas repetidas
+    # del estado anterior de Flexxus. No deben volver a entrar como C1/C2 corriente.
+    try:
+        bank_min = bank["Fecha_dt"].dropna().min()
+        if pd.notna(bank_min) and bool(flex.attrs.get("has_previous_conciliation", False)):
+            old_flex_idx = flex[
+                (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
+                (flex["FechaFlexxus_dt"].notna()) &
+                (flex["FechaFlexxus_dt"] < bank_min)
+            ].index
+            for fidx in old_flex_idx:
+                flex.loc[fidx, "ConsumedPrev"] = True
+                flex.loc[fidx, "MatchStage"] = "FLEXXUS_ANTERIOR_REPETIDO"
+                flex.loc[fidx, "Diagnostico"] = "Fila de Flexxus anterior repetida en reproceso; no entra como C1/C2 corriente"
+    except Exception:
+        pass
     flex, bank, mbext_ag = match_mbext_current_aggregated(flex, bank)
     flex.attrs["mbext_agregado"] = mbext_ag
     flex, bank, pedidosya_ag = match_pedidosya_current(flex, bank)
@@ -1075,7 +1463,7 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
     diff = round(saldo_b - calc, 2)
 
     ajuste_menor = 0.0
-    if abs(diff) > 0.005 and abs(diff) <= 5.0:
+    if abs(diff) > 0.005 and abs(diff) <= 10.0:
         ajuste_menor = float(diff)
         fecha_aj = fmt_date(bank["Fecha_dt"].max()) if not bank.empty and "Fecha_dt" in bank.columns else ""
         ajuste_row = {
@@ -1149,7 +1537,7 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
             "Fuente": "Corriente actual",
         })
 
-    pend_next = pd.DataFrame(next_pendings)
+    pend_next = assign_stable_pending_ids(pd.DataFrame(next_pendings))
 
     return {
         "mode": mode,
@@ -1439,7 +1827,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("SALDO BANCO CALCULADO (= Flex − C1 + C2 + C3 − C4 ± pendientes anteriores)", res["calc_final"]),
         (f"SALDO SEGÚN EXTRACTO BANCO al {period_max}", res["saldo_banco"]),
         ("DIFERENCIA FINAL (debe ser 0)", res["diferencia"]),
-        ("SALDO FINAL FLEXXUS PASANDO LAS CONCILIACIONES", res["saldo_flexxus"] - res["C1"]),
+        ("SALDO FINAL FLEXXUS PASANDO LAS CONCILIACIONES", res["saldo_flexxus"] if res.get("mode") != "APERTURA" else res["saldo_flexxus"] - res["C1"]),
         ("SALDO LUEGO DE PASAR TODO", res["saldo_banco"]),
     ]
     for label, val in final_rows:
@@ -1537,32 +1925,32 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     # HOJA 3: Flexxus no Banco
     ws3 = wb.create_sheet("Flexxus no Banco")
     ws3.cell(1, 1, "Detalle de movimientos registrados en Flexxus que no están acreditados en banco").font = sub_f
-    hw(ws3, 2, ["Fecha Flexxus", "Tipo", "Número", "Movimiento", "Monto", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia"])
+    hw(ws3, 2, ["ID trazabilidad", "Fecha Flexxus", "Tipo", "Número", "Movimiento", "Monto", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia"])
     rn = 3
     if not pf.empty:
         for _, p in pf.iterrows():
             local, cupon, liq, monto_comp, dif = enrich_flexxus_pending_row(p)
-            dw(ws3, rn, [p.get("FechaOrigen", ""), p.get("TipoMovimiento", ""), p.get("Numero", ""), p.get("Concepto", ""), float(p.get("Monto", 0.0)), local, cupon, liq, monto_comp, dif], mc=[5, 9, 10])
+            dw(ws3, rn, [p.get("pending_id", ""), p.get("FechaOrigen", ""), p.get("TipoMovimiento", ""), p.get("Numero", ""), p.get("Concepto", ""), float(p.get("Monto", 0.0)), local, cupon, liq, monto_comp, dif], mc=[6, 10, 11])
             rn += 1
     frz(ws3); aw(ws3)
 
     # HOJA 4: Banco ingresos no Flexxus
     ws4 = wb.create_sheet("Banco ingresos no Flexxus")
     ws4.cell(1, 1, "Detalle de ingresos del banco no registrados en Flexxus - con diagnóstico de origen").font = sub_f
-    hw(ws4, 2, ["Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Categoría", "Importe", "Saldo banco", "Origen detectado", "Archivo donde aparece", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia", "Diagnóstico", "Acción sugerida"])
+    hw(ws4, 2, ["ID trazabilidad", "Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Categoría", "Importe", "Saldo banco", "Origen detectado", "Archivo donde aparece", "Local", "Cupón QR", "Número de Liquidación de Tarjeta", "Monto comparado", "Diferencia", "Diagnóstico", "Acción sugerida"])
     rn = 3
     if not pbi.empty:
         for _, p in pbi.iterrows():
             cat = p.get("Categoria", "")
             cat_label = CAT_LABELS.get(cat, cat)
-            dw(ws4, rn, ["Banco ingreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cat_label, float(p.get("Monto", 0.0)), "", cat_label, p.get("Fuente", ""), "", "", "", "", "", "Ingreso bancario pendiente abierto", "Verificar si corresponde registrar como PAV o regularización"], mc=[6, 7])
+            dw(ws4, rn, [p.get("pending_id", ""), "Banco ingreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cat_label, float(p.get("Monto", 0.0)), "", cat_label, p.get("Fuente", ""), "", "", "", "", "", "Ingreso bancario pendiente abierto", "Verificar si corresponde registrar como PAV o regularización"], mc=[7, 8])
             rn += 1
     frz(ws4); aw(ws4)
 
     # HOJA 5: Banco egresos no Flexxus
     ws5 = wb.create_sheet("Banco egresos no Flexxus")
     ws5.cell(1, 1, "Detalle de egresos del banco no registrados en Flexxus").font = sub_f
-    hw(ws5, 2, ["Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Cuenta / apertura sugerida", "Tratamiento", "Importe", "Saldo banco", "Acción"])
+    hw(ws5, 2, ["ID trazabilidad", "Bloque", "Fecha banco", "Comprobante banco", "Concepto banco", "Cuenta / apertura sugerida", "Tratamiento", "Importe", "Saldo banco", "Acción"])
     rn = 3
     if not pbe.empty:
         for _, p in pbe.iterrows():
@@ -1570,29 +1958,29 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             cuenta = CAT_LABELS.get(cat, cat)
             trat = "Retención de Ingresos Brutos" if cat == "RETENCION_IIBB" else ("Anticipo Impuesto a las Ganancias" if "25413" in cat else ("IVA crédito fiscal / revisar" if cat == "IVA" else "Revisar según concepto"))
             accion = flexxus_copy_instruction(cat, float(p.get("Monto", 0.0)), p.get("FechaOrigen", ""), p.get("Concepto", "")) if cat in IMP_CATS else "Registrar asiento / revisar según concepto"
-            dw(ws5, rn, ["Banco egreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cuenta, trat, float(p.get("Monto", 0.0)), "", accion], mc=[7, 8])
+            dw(ws5, rn, [p.get("pending_id", ""), "Banco egreso no Flexxus", p.get("FechaOrigen", ""), p.get("Numero", ""), p.get("Concepto", ""), cuenta, trat, float(p.get("Monto", 0.0)), "", accion], mc=[8, 9])
             rn += 1
     frz(ws5); aw(ws5)
 
     # HOJA 6: Regularizaciones
     ws_reg = wb.create_sheet("Regularizaciones")
     ws_reg.cell(1, 1, "Regularizaciones y ajustes ya incorporados").font = sub_f
-    hw(ws_reg, 2, ["Concepto", "Fecha Flexxus", "Tipo", "Número", "Movimiento", "Cant. banco", "Importe", "Observación"])
+    hw(ws_reg, 2, ["ID trazabilidad", "Concepto", "Fecha Flexxus", "Tipo", "Número", "Movimiento", "Cant. banco", "Importe", "Observación"])
     rn = 3
     regs = res.get("regularizaciones", pd.DataFrame())
     if regs is not None and not regs.empty:
         for _, r in regs.iterrows():
-            dw(ws_reg, rn, [r.get("Origen pendiente", "Regularización período anterior"), r.get("Fecha regularización", ""), r.get("Tipo actual", ""), r.get("Referencia actual", ""), r.get("Concepto actual", ""), "", float(r.get("Monto actual", r.get("Monto pendiente", 0.0))), r.get("Diagnóstico", "")], mc=[7])
+            dw(ws_reg, rn, [r.get("ID pendiente", ""), r.get("Origen pendiente", "Regularización período anterior"), r.get("Fecha regularización", ""), r.get("Tipo actual", ""), r.get("Referencia actual", ""), r.get("Concepto actual", ""), "", float(r.get("Monto actual", r.get("Monto pendiente", 0.0))), r.get("Diagnóstico", "")], mc=[8])
             rn += 1
     ag = res.get("mbext_agregado", pd.DataFrame())
     if ag is not None and not ag.empty:
         for _, a in ag.iterrows():
-            dw(ws_reg, rn, ["MB-EXT agregado contra banco", a.get("Fecha Flexxus", ""), "MB-EXT", a.get("Número Flexxus", ""), a.get("Concepto Flexxus", ""), a.get("Cantidad líneas banco", ""), float(a.get("Monto Flexxus", 0.0)), a.get("Diagnóstico", "")], mc=[7])
+            dw(ws_reg, rn, ["AGREGADO-MBEXT", "MB-EXT agregado contra banco", a.get("Fecha Flexxus", ""), "MB-EXT", a.get("Número Flexxus", ""), a.get("Concepto Flexxus", ""), a.get("Cantidad líneas banco", ""), float(a.get("Monto Flexxus", 0.0)), a.get("Diagnóstico", "")], mc=[8])
             rn += 1
     pav_ag = res.get("pav_qr_agregado", pd.DataFrame())
     if pav_ag is not None and not pav_ag.empty:
         for _, a in pav_ag.iterrows():
-            dw(ws_reg, rn, ["PAV QR agregado contra banco", a.get("Fecha Flexxus", ""), "PAV", a.get("Número Flexxus", ""), a.get("Concepto Flexxus", ""), a.get("Cantidad líneas banco", ""), float(a.get("Monto Flexxus", 0.0)), a.get("Diagnóstico", "")], mc=[7])
+            dw(ws_reg, rn, ["AGREGADO-PAVQR", "PAV QR agregado contra banco", a.get("Fecha Flexxus", ""), "PAV", a.get("Número Flexxus", ""), a.get("Concepto Flexxus", ""), a.get("Cantidad líneas banco", ""), float(a.get("Monto Flexxus", 0.0)), a.get("Diagnóstico", "")], mc=[8])
             rn += 1
     if rn == 3:
         ws_reg.cell(3, 1, "Sin regularizaciones en este período").font = norm
@@ -1722,7 +2110,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V4.7-INTEGRADA-FLEXXUS-NOBANCO-OBS-COPIAR-FLEXXUS-2026-04-29"
+APP_VERSION = "V5.0-ID-UNICO-LETRA-SECUENCIA-TRAZABILIDAD-2026-04-30"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -1735,7 +2123,7 @@ def render_header_v4():
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1F4E78,#0F243E);padding:28px;border-radius:14px;margin-bottom:20px;color:white">
       <div style="font-size:13px;opacity:.75;letter-spacing:.08em">GRUPO DANCONA · CONTROL BANCARIO</div>
-      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V4.7</div>
+      <div style="font-size:30px;font-weight:700">Conciliación Bancaria Continua V5.0</div>
       <div style="font-size:15px;opacity:.85;margin-top:6px">Login · Historial con archivos · Administrador · Botón Comenzar · Pendientes anteriores · Matching agregado MB-EXT · Sin ajustes genéricos.</div>
       <div style="font-size:11px;opacity:.70;margin-top:10px;font-family:monospace">{APP_VERSION}</div>
     </div>
@@ -2063,7 +2451,7 @@ def render_conciliacion_tab():
                 qr = parse_qr(f_qr) if f_qr else pd.DataFrame()
                 prev_open, prev_summary, mode = parse_previous_conciliation(f_prev)
             with st.spinner("Cancelando pendientes anteriores contra movimientos actuales..."):
-                prev_status, flex, bank, regs = match_previous_pendings(prev_open, flex, bank)
+                prev_status, flex, bank, regs = match_previous_pendings(prev_open, flex, bank, prev_summary)
             with st.spinner("Conciliando movimientos corrientes..."):
                 flex, bank = match_current(flex, bank, qr, trx)
                 res = compute_results(flex, bank, prev_status, regs, mode, prev_summary)
@@ -2145,9 +2533,9 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V4.7", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V4_7.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.0", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_0.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V4_7.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_0.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
