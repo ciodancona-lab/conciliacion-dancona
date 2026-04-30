@@ -1,5 +1,5 @@
 # app.py
-# Versión estable V5.8 FINAL: conciliación bancaria continua Grupo Dancona.
+# Versión estable V5.9 FINAL: conciliación bancaria continua Grupo Dancona.
 # Separa saldo Flexxus real, saldo ajustado conciliatorio y total importado .xls.
 # Integra login, historial, administrador de archivos, diagnóstico/reset,
 # conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
@@ -43,7 +43,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V5.8",
+    page_title="Conciliación Bancaria Dancona · V5.9",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -884,24 +884,38 @@ def match_previous_pendings(prev_open: pd.DataFrame, flex: pd.DataFrame, bank: p
     flex.attrs["is_reprocess_same_extract"] = is_reprocess_same_extract
     bank.attrs["is_reprocess_same_extract"] = is_reprocess_same_extract
 
-    processed_prev = prev[prev.get("Origen", "").astype(str).eq("FLEXXUS_PROCESADO_ANTERIOR")].copy() if ("Origen" in prev.columns and is_reprocess_same_extract) else pd.DataFrame()
+    processed_prev = prev[prev.get("Origen", "").astype(str).eq("FLEXXUS_PROCESADO_ANTERIOR")].copy() if ("Origen" in prev.columns) else pd.DataFrame()
     if not processed_prev.empty:
         for _, p in processed_prev.iterrows():
             tipo = str(p.get("TipoMovimiento", ""))
             numero = str(p.get("Numero", ""))
             monto = float(p.get("Monto", 0.0) or 0.0)
+            concepto_prev = norm_txt(p.get("Concepto", ""))
             candidates = flex[
                 (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
                 (flex["Tipo"].astype(str).eq(tipo)) &
                 (flex["Numero"].astype(str).eq(numero)) &
                 (flex["MontoFlexxus"].apply(lambda x: amount_exact(x, monto, tol=0.05)))
             ].copy()
+            if candidates.empty and numero:
+                candidates = flex[
+                    (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
+                    (flex["Numero"].astype(str).eq(numero)) &
+                    (flex["MontoFlexxus"].apply(lambda x: amount_exact(x, monto, tol=0.05)))
+                ].copy()
+            if candidates.empty and concepto_prev:
+                candidates = flex[
+                    (~flex["Matched"]) & (~flex["ConsumedPrev"]) &
+                    (flex["Tipo"].astype(str).eq(tipo)) &
+                    (flex["MontoFlexxus"].apply(lambda x: amount_exact(x, monto, tol=0.05))) &
+                    (flex["ConceptoNorm"].astype(str).eq(concepto_prev))
+                ].copy()
             if not candidates.empty:
                 fidx = candidates.index[0]
                 flex.loc[fidx, "ConsumedPrev"] = True
                 flex.loc[fidx, "MatchStage"] = "YA_PROCESADO_ANTERIOR"
                 flex.loc[fidx, "MatchRef"] = p.get("pending_id", "")
-                flex.loc[fidx, "Diagnostico"] = "Movimiento ya incluido en conciliación anterior; no entra como pendiente corriente"
+                flex.loc[fidx, "Diagnostico"] = "Movimiento ya incluido en conciliación anterior; bloqueado por clave estable V5.9"
         prev = prev[~prev.get("Origen", "").astype(str).eq("FLEXXUS_PROCESADO_ANTERIOR")].reset_index(drop=True)
 
     processed_bank_prev = prev[prev.get("Origen", "").astype(str).eq("BANCO_PROCESADO_ANTERIOR")].copy() if ("Origen" in prev.columns and is_reprocess_same_extract) else pd.DataFrame()
@@ -1519,7 +1533,7 @@ def compute_results(flex: pd.DataFrame, bank: pd.DataFrame, prev_status: pd.Data
     calc = saldo_f - C1 + C2 + C3 - C4
     diff = round(saldo_b - calc, 2)
 
-    if abs(diff) > 0.005 and abs(diff) <= 1.0:
+    if abs(diff) > 0.005 and abs(diff) <= 10.0:
         fecha_aj = fmt_date(bank["Fecha_dt"].max()) if not bank.empty and "Fecha_dt" in bank.columns else ""
         ajuste_row = {
             "row_id": f"AJ-{uuid.uuid4().hex[:10]}",
@@ -2414,7 +2428,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.8-FINAL-SALDOS-SEPARADOS-FORMULAS-COBERTURA-2026-04-30"
+APP_VERSION = "V5.9-FINAL-GUARDRAILS-REGULARIZACIONES-CONTINUIDAD-2026-04-30"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -2858,9 +2872,9 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V5.8", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_8.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.9", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_8.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_9.xls", mime="application/vnd.ms-excel", use_container_width=True)
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
