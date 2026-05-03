@@ -67,6 +67,40 @@
         }
       ],
       "eliminado": false
+    },
+    {
+      "id": "20260503_161334",
+      "fecha_proceso": "03/05/2026 16:13:36",
+      "version_app": "V5.9.13 LEDGER QR + REGLA 3 EQUIVALENCIA HISTORICA · 2026-05-03",
+      "modo": "ANTERIOR",
+      "saldo_flexxus": 24996327.79,
+      "saldo_banco": 27584507.39,
+      "banco_calculado": 27584507.39,
+      "diferencia": 0.0,
+      "C1_flexxus_ingresos_no_banco": 107348.44,
+      "C2_flexxus_egresos_no_banco": 0.0,
+      "C3_banco_ingresos_no_flexxus": 4614410.16,
+      "C4_banco_egresos_no_flexxus": 1918882.12,
+      "pendientes_anteriores_abiertos": 260,
+      "regularizaciones_anteriores": 61,
+      "pendientes_proxima": 420,
+      "trazabilidad_procesada_anterior": 250,
+      "mbext_agregados": 0,
+      "archivos": [
+        {
+          "tipo": "conciliacion_xlsx",
+          "nombre": "Conciliacion_Semanal_Dancona_20260503_161334.xlsx",
+          "path": "historial/20260503_161334/Conciliacion_Semanal_Dancona_20260503_161334.xlsx",
+          "bytes": 97526
+        },
+        {
+          "tipo": "import_flexxus_xls",
+          "nombre": "ASIENTOS_FLEXXUS_20260503_161334.xls",
+          "path": "historial/20260503_161334/ASIENTOS_FLEXXUS_20260503_161334.xls",
+          "bytes": 5632
+        }
+      ],
+      "eliminado": false
     }
   ]
 }
