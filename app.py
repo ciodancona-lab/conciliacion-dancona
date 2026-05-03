@@ -1,6 +1,8 @@
 # app.py
-# Versión estable V5.9 FINAL: conciliación bancaria continua Grupo Dancona.
-# Separa saldo Flexxus real, saldo ajustado conciliatorio y total importado .xls.
+# Versión V5.9.12 LEDGER QR PERSISTENTE: agrega ledger cupón-céntrico para
+# bloquear reuso de PAV/CR DEBIN ya cerrados en períodos anteriores.
+# Mantiene intacto el motor V5.9.11 (apply_v5911_safe_double_punta,
+# match_previous_pendings, match_current, compute_results).
 # Integra login, historial, administrador de archivos, diagnóstico/reset,
 # conciliación anterior, pendientes abiertos con ID estable, regularizaciones,
 # matching agregado MB-EXT/PAV-QR, Pedidos Ya y exportación Flexxus.
@@ -39,11 +41,37 @@ from openpyxl.utils import get_column_letter
 warnings.filterwarnings("ignore")
 
 # =============================================================================
+# V5.9.12 — Ledger QR persistente
+# =============================================================================
+# El módulo qr_ledger.py debe estar junto a este archivo (mismo directorio).
+# Si no se puede importar, la app cae en modo V5.9.11 puro y avisa.
+
+try:
+    from qr_ledger import (
+        QRLedger,
+        bank_uid as _ledger_bank_uid,
+        flex_uid as _ledger_flex_uid,
+        bank_uids_locked as _ledger_bank_uids_locked,
+        flex_uids_locked as _ledger_flex_uids_locked,
+        ingest_qr_transactions as _ledger_ingest_qr,
+        attach_bank_to_cupons as _ledger_attach_bank,
+        attach_flexxus_to_cupons as _ledger_attach_flex,
+        resumen_estados as _ledger_resumen,
+        Estado as _LedgerEstado,
+        _to_iso_date as _ledger_iso_date,
+        _hash as _ledger_hash,
+    )
+    LEDGER_DISPONIBLE = True
+except Exception as _ex:
+    LEDGER_DISPONIBLE = False
+    _LEDGER_IMPORT_ERROR = str(_ex)
+
+# =============================================================================
 # CONFIG
 # =============================================================================
 
 st.set_page_config(
-    page_title="Conciliación Bancaria Dancona · V5.9",
+    page_title="Conciliación Bancaria Dancona · V5.9.12 Ledger QR",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -357,14 +385,145 @@ def parse_qr(file) -> pd.DataFrame:
     fecha_col = first_existing(["Fecha", "FECHA", "Fecha QR", "Fecha de pago", "Fecha transacción", "Fecha Transacción"])
     comercio_col = first_existing(["Cód. comercio", "Cod. comercio", "Código comercio", "Comercio", "COMERCIO"])
     ticket_col = first_existing(["Ticket", "TICKET", "Cupón", "Cupon", "Id QR", "ID QR"])
+    terminal_col = first_existing(["Terminal", "TERMINAL", "Nro. Terminal", "Nro Terminal", "Número terminal"])
+    estado_col = first_existing(["Estado", "ESTADO"])
 
     qr["MontoTotal"] = series_or_blank(monto_col).apply(parse_ar_num) if monto_col else 0.0
-    qr["NetoQR"] = qr["MontoTotal"] * 0.99032
+    qr["NetoQR"] = (qr["MontoTotal"] * 0.99032).round(2)
     qr["FechaQR"] = series_or_blank(fecha_col).astype(str).str[:10] if fecha_col else ""
     qr["FechaQR_dt"] = qr["FechaQR"].apply(safe_date)
     qr["CodComercio"] = series_or_blank(comercio_col).astype(str) if comercio_col else ""
     qr["Cupon"] = series_or_blank(ticket_col).astype(str) if ticket_col else ""
+    qr["TerminalQR"] = series_or_blank(terminal_col).astype(str) if terminal_col else ""
+    qr["EstadoQR"] = series_or_blank(estado_col).astype(str) if estado_col else ""
+    qr["QRRowOrder"] = range(1, len(qr) + 1)
     return qr
+
+
+def clasificar_qr_humano(esta_banco: bool, esta_flexxus: bool) -> Tuple[str, str]:
+    """Clasificación QR contable uno a uno.
+
+    Regla V5.9.1: un QR de Transacciones solo puede terminar en cuatro estados:
+    cerrado, Banco ingresos no Flexxus, Flexxus no Banco o solo Transacciones.
+    No existe "QR no reflejado" como categoría contable.
+    """
+    if esta_banco and esta_flexxus:
+        return "CERRADO", "QR en Transacciones, Banco y Flexxus"
+    if esta_banco and not esta_flexxus:
+        return "BANCO_INGRESO_NO_FLEXXUS", "QR acreditado en banco sin PAV/Flexxus visible"
+    if not esta_banco and esta_flexxus:
+        return "FLEXXUS_NO_BANCO", "QR cargado en Flexxus pendiente de acreditación bancaria"
+    return "SOLO_TRANSACCIONES", "QR informado por Merchant; aún sin Banco ni Flexxus"
+
+
+def _best_qr_bank_match(qrow: pd.Series, bank: pd.DataFrame, used_bank: Optional[set] = None, max_days_after: int = 5, tol: float = 0.05):
+    used_bank = used_bank or set()
+    if bank is None or bank.empty or "ImporteAbs" not in bank.columns:
+        return None
+    neto = round(float(qrow.get("NetoQR", 0.0) or 0.0), 2)
+    qdate = safe_date(qrow.get("FechaQR_dt", qrow.get("FechaQR", "")))
+    cand = bank[
+        (~bank.index.isin(used_bank)) &
+        (bank.get("EsIngreso", False)) &
+        (bank.get("Categoria", "").astype(str).eq("QR")) &
+        (bank["ImporteAbs"].apply(lambda x: abs(round(float(x), 2) - neto) <= tol))
+    ].copy()
+    if cand.empty:
+        return None
+    if pd.notna(qdate) and "Fecha_dt" in cand.columns:
+        cand["dias_desde_qr"] = (cand["Fecha_dt"] - qdate).dt.days
+        dated = cand[(cand["dias_desde_qr"] >= -1) & (cand["dias_desde_qr"] <= max_days_after)].copy()
+        if not dated.empty:
+            cand = dated
+    else:
+        cand["dias_desde_qr"] = 9999
+    cand["diff_importe"] = cand["ImporteAbs"].apply(lambda x: abs(round(float(x), 2) - neto))
+    sort_cols = ["diff_importe", "dias_desde_qr"] + (["SourceOrder"] if "SourceOrder" in cand.columns else ["row_id"])
+    return cand.sort_values(sort_cols).iloc[0]
+
+
+def _best_qr_flexxus_match(qrow: pd.Series, flex: pd.DataFrame, used_flex: Optional[set] = None, max_days_after: int = 2, tol: float = 1.00):
+    used_flex = used_flex or set()
+    if flex is None or flex.empty or "MontoFlexxus" not in flex.columns:
+        return None
+    neto = round(float(qrow.get("NetoQR", 0.0) or 0.0), 2)
+    qdate = safe_date(qrow.get("FechaQR_dt", qrow.get("FechaQR", "")))
+    cand = flex[
+        (~flex.index.isin(used_flex)) &
+        (flex.get("Tipo", "").astype(str).eq("PAV")) &
+        (~flex.get("EsPedidosYa", False)) &
+        (flex["MontoFlexxus"].apply(lambda x: abs(round(float(x), 2) - neto) <= tol))
+    ].copy()
+    if cand.empty:
+        return None
+    if pd.notna(qdate) and "FechaFlexxus_dt" in cand.columns:
+        cand["dias_desde_qr"] = (cand["FechaFlexxus_dt"] - qdate).dt.days
+        dated = cand[(cand["dias_desde_qr"] >= -1) & (cand["dias_desde_qr"] <= max_days_after)].copy()
+        if not dated.empty:
+            cand = dated
+    else:
+        cand["dias_desde_qr"] = 9999
+    cand["diff_importe"] = cand["MontoFlexxus"].apply(lambda x: abs(round(float(x), 2) - neto))
+    return cand.sort_values(["diff_importe", "dias_desde_qr", "row_id"]).iloc[0]
+
+
+def build_qr_humano_audit(qr: pd.DataFrame, bank: pd.DataFrame, flex: pd.DataFrame) -> pd.DataFrame:
+    """Arma la auditoría QR uno a uno: Transacciones -> Banco -> Flexxus.
+
+    Esta tabla es de diagnóstico humano. No crea ajustes ni modifica el cierre.
+    """
+    cols = ["Fecha QR", "Estado QR", "Comercio", "Local", "Terminal", "Cupón/ID",
+            "Monto Bruto", "Neto Calc.", "En Banco", "Fecha banco", "Comprobante banco",
+            "Importe banco", "En Flexxus", "Fecha Flexxus", "PAV Flexxus", "Importe Flexxus",
+            "Estado Match", "Tratamiento contable", "Diagnóstico"]
+    if qr is None or qr.empty:
+        return pd.DataFrame(columns=cols)
+    qrs = qr.copy()
+    if "FechaQR_dt" in qrs.columns:
+        qrs = qrs.sort_values(["FechaQR_dt", "NetoQR", "QRRowOrder"], na_position="last")
+    used_bank, used_flex = set(), set()
+    rows = []
+    for _, q in qrs.iterrows():
+        cod = re.sub(r"[^0-9]", "", str(q.get("CodComercio", "")))
+        local = LOCAL_MAP.get(cod, cod)
+        neto = round(float(q.get("NetoQR", 0.0) or 0.0), 2)
+        b = _best_qr_bank_match(q, bank, used_bank=used_bank)
+        f = _best_qr_flexxus_match(q, flex, used_flex=used_flex)
+        if b is not None:
+            used_bank.add(b.name)
+        if f is not None:
+            used_flex.add(f.name)
+        estado, diag = clasificar_qr_humano(b is not None, f is not None)
+        if estado == "CERRADO":
+            tratamiento = "Cerrado; no va a pendientes"
+        elif estado == "BANCO_INGRESO_NO_FLEXXUS":
+            tratamiento = "Banco ingresos no Flexxus"
+        elif estado == "FLEXXUS_NO_BANCO":
+            tratamiento = "Flexxus no Banco"
+        else:
+            tratamiento = "Solo auditoría QR; no afecta conciliación bancaria todavía"
+        rows.append({
+            "Fecha QR": q.get("FechaQR", ""),
+            "Estado QR": q.get("EstadoQR", q.get("Estado", "")),
+            "Comercio": cod or q.get("CodComercio", ""),
+            "Local": local,
+            "Terminal": q.get("TerminalQR", q.get("Terminal", "")),
+            "Cupón/ID": q.get("Cupon", ""),
+            "Monto Bruto": float(q.get("MontoTotal", 0.0) or 0.0),
+            "Neto Calc.": neto,
+            "En Banco": "Sí" if b is not None else "No",
+            "Fecha banco": b.get("Fecha", "") if b is not None else "",
+            "Comprobante banco": b.get("Comprobante", "") if b is not None else "",
+            "Importe banco": float(b.get("ImporteAbs", 0.0)) if b is not None else "",
+            "En Flexxus": "Sí" if f is not None else "No",
+            "Fecha Flexxus": f.get("FechaFlexxus", "") if f is not None else "",
+            "PAV Flexxus": f.get("Numero", "") if f is not None else "",
+            "Importe Flexxus": float(f.get("MontoFlexxus", 0.0)) if f is not None else "",
+            "Estado Match": estado,
+            "Tratamiento contable": tratamiento,
+            "Diagnóstico": diag,
+        })
+    return pd.DataFrame(rows, columns=cols)
 
 def parse_trx(file) -> pd.DataFrame:
     if file is None:
@@ -597,6 +756,32 @@ def parse_previous_conciliation(file) -> Tuple[pd.DataFrame, Dict[str, float], s
                         "SignoCalculo": 1,
                         "Estado": "ABIERTO",
                         "Fuente": "Banco ingresos no Flexxus anterior",
+                    })
+        # V5.9.13: Banco ingresos REGULARIZADOS por regla 3 (para que el cálculo
+        # del próximo período los conozca como ya regularizados, no como pendientes activos)
+        if "Banco ingresos REGULARIZADO REGLA3" in xl.sheet_names:
+            raw_r3 = pd.read_excel(file, sheet_name="Banco ingresos REGULARIZADO REGLA3", header=None, dtype=str)
+            h_r3 = _find_header_row(raw_r3, ["Fecha banco", "Concepto", "Importe"])
+            if h_r3 is not None:
+                bi_r3 = pd.read_excel(file, sheet_name="Banco ingresos REGULARIZADO REGLA3", header=h_r3, dtype=str)
+                for _, r in bi_r3.iterrows():
+                    concepto = str(r.get("Concepto", "")).strip()
+                    monto = parse_ar_num(r.get("Importe", 0))
+                    if not concepto or abs(monto) <= 0.005:
+                        continue
+                    pendings.append({
+                        "pending_id": f"P-{uuid.uuid4().hex[:10]}",
+                        "FechaOrigen": str(r.get("Fecha banco", "")).strip(),
+                        "Origen": "BANCO_NO_FLEXXUS_REGULARIZADO_REGLA3",
+                        "TipoPendiente": "REGULARIZACION_LEDGER_QR",
+                        "TipoMovimiento": "PAV",
+                        "Numero": str(r.get("Comprobante banco", "")).strip(),
+                        "Concepto": concepto,
+                        "Categoria": "REGULARIZACION_REGLA3",
+                        "Monto": abs(monto),
+                        "SignoCalculo": 0,  # No afecta cálculo, solo trazabilidad
+                        "Estado": "REGULARIZADO_REGLA3_ANTERIOR",
+                        "Fuente": "Banco ingresos REGULARIZADO REGLA3 anterior",
                     })
         # Banco egresos no Flexxus
         if "Banco egresos no Flexxus" in xl.sheet_names:
@@ -1690,6 +1875,126 @@ def write_df(ws, start_row: int, start_col: int, df: pd.DataFrame, money_cols: O
 
 
 
+
+
+def v5911_recompute_from_pendings(res: Dict) -> Dict:
+    pend = res.get("pendientes_proxima", pd.DataFrame())
+    if pend is None or pend.empty:
+        C1 = C2 = C3 = C4 = 0.0
+    else:
+        pf = pend[pend["Origen"].astype(str).eq("FLEXXUS_NO_BANCO")].copy()
+        pbi = pend[(pend["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")) & (pend["SignoCalculo"].astype(float) > 0)].copy()
+        pbe = pend[(pend["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")) & (pend["SignoCalculo"].astype(float) < 0)].copy()
+        C1 = float(pf[pf["TipoMovimiento"].astype(str).eq("PAV")]["Monto"].sum()) if not pf.empty else 0.0
+        C2 = float(pf[~pf["TipoMovimiento"].astype(str).eq("PAV")]["Monto"].sum()) if not pf.empty else 0.0
+        C3 = float(pbi["Monto"].sum()) if not pbi.empty else 0.0
+        C4 = float(pbe["Monto"].sum()) if not pbe.empty else 0.0
+    calc = float(res.get("saldo_flexxus", 0.0)) - C1 + C2 + C3 - C4
+    diff = round(float(res.get("saldo_banco", 0.0)) - calc, 2)
+    res.update({"C1": C1, "C2": C2, "C3": C3, "C4": C4, "calc_final": calc, "diferencia": diff})
+    return res
+
+
+def v5911_is_qr_category(value) -> bool:
+    t = norm_txt(value)
+    compact = re.sub(r"[^A-Z0-9]", "", t)
+    return normalize_category_code(value) == "QR" or "CR DEBIN" in t or "DEBIN" in compact or compact == "QR"
+
+
+def apply_v5911_safe_double_punta(res: Dict) -> Dict:
+    """Cierra únicamente QR con doble punta abierta simultánea en pendientes.
+
+    No usa PAV ya procesados ni Carga Flexxus histórica. Si un CR DEBIN tiene
+    coincidencia por importe contra un PAV que no está abierto en pendientes,
+    queda visible y se explica en auditoría; no se borra.
+    """
+    pend = res.get("pendientes_proxima", pd.DataFrame())
+    if pend is None or pend.empty:
+        res["v5911_cierres_qr_seguro"] = pd.DataFrame()
+        return res
+    pend = pend.copy()
+    bank_qr = pend[
+        pend["Origen"].astype(str).eq("BANCO_NO_FLEXXUS")
+        & (pend["SignoCalculo"].astype(float) > 0)
+        & pend["Categoria"].apply(v5911_is_qr_category)
+    ].copy()
+    flex_pav = pend[
+        pend["Origen"].astype(str).eq("FLEXXUS_NO_BANCO")
+        & pend["TipoMovimiento"].astype(str).eq("PAV")
+    ].copy()
+    if bank_qr.empty or flex_pav.empty:
+        res["v5911_cierres_qr_seguro"] = pd.DataFrame()
+        return res
+    used_b, used_f, rows = set(), set(), []
+    # Recorre PAV abiertos: si hay banco QR compatible <= $1, cierra ambas puntas.
+    for fidx, f in flex_pav.sort_values(["Monto", "FechaOrigen"]).iterrows():
+        candidates = bank_qr[~bank_qr.index.isin(used_b)].copy()
+        if candidates.empty:
+            continue
+        f_amt = float(f.get("Monto", 0.0) or 0.0)
+        candidates["_diff"] = candidates["Monto"].apply(lambda x: abs(float(x) - f_amt))
+        candidates = candidates[candidates["_diff"] <= 1.00].copy()
+        if candidates.empty:
+            continue
+        # Si hay varias, elegir la diferencia más chica y la fecha banco más cercana/posterior.
+        try:
+            fdate = safe_date(f.get("FechaOrigen", ""))
+            candidates["_date_diff"] = candidates["FechaOrigen"].apply(lambda d: abs((safe_date(d) - fdate).days) if pd.notna(safe_date(d)) and pd.notna(fdate) else 9999)
+        except Exception:
+            candidates["_date_diff"] = 9999
+        bidx = candidates.sort_values(["_diff", "_date_diff", "Monto"]).index[0]
+        if bidx in used_b or fidx in used_f:
+            continue
+        used_b.add(bidx); used_f.add(fidx)
+        rows.append({
+            "ID Banco": pend.loc[bidx, "pending_id"],
+            "Fecha banco": pend.loc[bidx, "FechaOrigen"],
+            "Comprobante banco": pend.loc[bidx, "Numero"],
+            "Importe banco": float(pend.loc[bidx, "Monto"]),
+            "ID Flexxus": pend.loc[fidx, "pending_id"],
+            "Fecha Flexxus": pend.loc[fidx, "FechaOrigen"],
+            "PAV Flexxus": pend.loc[fidx, "Numero"],
+            "Importe Flexxus": float(pend.loc[fidx, "Monto"]),
+            "Diferencia": round(float(pend.loc[bidx, "Monto"]) - float(pend.loc[fidx, "Monto"]), 2),
+            "Diagnóstico": "Cierre QR V5.9.11 con doble punta abierta; no usa PAV histórico ya procesado",
+        })
+    if not rows:
+        res["v5911_cierres_qr_seguro"] = pd.DataFrame()
+        return res
+    to_drop = set(used_b) | set(used_f)
+    pend2 = pend.drop(index=list(to_drop)).copy()
+    res["pendientes_proxima"] = assign_stable_pending_ids(pend2)
+    res["v5911_cierres_qr_seguro"] = pd.DataFrame(rows)
+    res = v5911_recompute_from_pendings(res)
+    # Diferencias chicas por centavos se dejan explícitas, no ocultas.
+    if abs(float(res.get("diferencia", 0))) > 0.005 and abs(float(res.get("diferencia", 0))) <= 10.0:
+        diff = float(res["diferencia"])
+        fecha = ""
+        try:
+            cb = res.get("current_unmatched_b", pd.DataFrame())
+            if cb is not None and not cb.empty and "Fecha_dt" in cb.columns:
+                fecha = fmt_date(cb["Fecha_dt"].dropna().max())
+        except Exception:
+            pass
+        row = {
+            "pending_id": stable_pending_id("BANCO_NO_FLEXXUS", fecha, "CTRL-V5911-QR", "CTRL-V5911-QR", "Diferencia técnica menor por cierre QR doble punta", "AJUSTE_MENOR_REDONDEO", abs(diff)),
+            "FechaOrigen": fecha,
+            "Origen": "BANCO_NO_FLEXXUS",
+            "TipoPendiente": "BANCO_INGRESO_NO_FLEXXUS" if diff > 0 else "BANCO_EGRESO_NO_FLEXXUS",
+            "TipoMovimiento": "PAV" if diff > 0 else "MB-EXT",
+            "Numero": "CTRL-V5911-QR",
+            "Concepto": "Diferencia técnica menor por cierre QR doble punta",
+            "Categoria": "AJUSTE_MENOR_REDONDEO",
+            "Monto": abs(diff),
+            "SignoCalculo": 1 if diff > 0 else -1,
+            "Estado": "CONTROL_V5911_QR_MENOR",
+            "Fuente": "Control visible V5.9.11",
+        }
+        res["pendientes_proxima"] = assign_stable_pending_ids(pd.concat([res["pendientes_proxima"], pd.DataFrame([row])], ignore_index=True))
+        res = v5911_recompute_from_pendings(res)
+    return res
+
+
 def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame, trx: pd.DataFrame, res: Dict) -> io.BytesIO:
     wb = Workbook()
     ws = wb.active
@@ -2119,6 +2424,28 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
             rn += 1
     frz(ws4); aw(ws4)
 
+    # HOJA: Banco ingresos REGULARIZADOS por regla 3 (NO se suman al cálculo, se persisten para próxima conciliación)
+    pend_full_for_reg3 = res.get("pendientes_proxima", pd.DataFrame())
+    if not pend_full_for_reg3.empty:
+        preg3 = pend_full_for_reg3[pend_full_for_reg3["Origen"].astype(str).eq("BANCO_NO_FLEXXUS_REGULARIZADO_REGLA3")].copy()
+        if not preg3.empty:
+            ws_reg3 = wb.create_sheet("Banco ingresos REGULARIZADO REGLA3")
+            ws_reg3.cell(1, 1, "Pendientes de banco regularizados automáticamente por regla 3 (V5.9.13). NO sumar a B12.").font = sub_f
+            hw(ws_reg3, 2, ["ID trazabilidad", "Estado", "Fecha banco", "Comprobante banco", "Concepto banco", "Importe", "Diagnóstico"])
+            rr = 3
+            for _, p in preg3.iterrows():
+                dw(ws_reg3, rr, [
+                    p.get("pending_id", ""),
+                    "REGULARIZADO_REGLA3",
+                    p.get("FechaOrigen", ""),
+                    p.get("Numero", ""),
+                    p.get("Concepto", ""),
+                    float(p.get("Monto", 0.0)),
+                    "Pendiente regularizado por equivalencia QR histórica V5.9.13. Ya contemplado en saldo Flexxus de períodos anteriores.",
+                ], mc=[6])
+                rr += 1
+            frz(ws_reg3); aw(ws_reg3)
+
     # HOJA 5: Banco egresos no Flexxus
     ws5 = wb.create_sheet("Banco egresos no Flexxus")
     ws5.cell(1, 1, "Detalle de egresos del banco no registrados en Flexxus").font = sub_f
@@ -2191,21 +2518,15 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
 
     # HOJA 8: Auditoría QR PCT
     ws7 = wb.create_sheet("Auditoría QR PCT")
-    hw(ws7, 1, ["Fecha QR", "Estado", "Comercio", "Local", "Terminal", "Cupón/ID", "Monto Bruto", "Neto Calc.", "En Banco", "En Flexxus", "Estado Match"])
+    qr_audit = build_qr_humano_audit(qr, bank, flex)
+    hw(ws7, 1, list(qr_audit.columns))
     rn = 2
-    if qr is not None and not qr.empty:
-        for _, q in qr.iterrows():
-            cod = str(q.get("CodComercio", ""))
-            local = LOCAL_MAP.get(cod, cod)
-            terminal = q.get("Terminal", "")
-            if terminal == "" and "Terminal" in q.index:
-                terminal = q.get("Terminal", "")
-            neto = float(q.get("NetoQR", 0.0))
-            in_b = "Sí" if (not bank.empty and "Categoria" in bank.columns and len(bank[(bank["Categoria"] == "QR") & (abs(bank["ImporteAbs"] - neto) < 1.0)]) > 0) else "No"
-            in_f = "Sí" if (not matched.empty and "MontoFlexxus" in matched.columns and len(matched[abs(matched["MontoFlexxus"] - neto) < 1.0]) > 0) else "No"
-            estado_match = "OK - en banco y Flexxus" if in_b == "Sí" and in_f == "Sí" else ("En banco, NO en Flexxus" if in_b == "Sí" else "Revisar")
-            dw(ws7, rn, [q.get("FechaQR", ""), q.get("Estado", ""), cod, local, terminal, q.get("Cupon", ""), float(q.get("MontoTotal", 0.0)), round(neto, 2), in_b, in_f, estado_match], mc=[7, 8])
+    if qr_audit is not None and not qr_audit.empty:
+        for _, r in qr_audit.iterrows():
+            dw(ws7, rn, [r.get(c, "") for c in qr_audit.columns], mc=[7, 8, 12, 16])
             rn += 1
+    else:
+        ws7.cell(2, 1, "Sin archivo QR / Transacciones cargado").font = norm
     frz(ws7); aw(ws7)
 
     # HOJA 9: Auditoría TRX Merchant
@@ -2379,6 +2700,7 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ("Fechas Flexxus", "Si fecha banco < fecha Flexxus, el archivo final usa FECHAACREDITACION = FECHAMOVIMIENTO; la fecha real queda en auditoría."),
         ("V5.8", "Versión final: separa saldo Flexxus real, saldo Flexxus ajustado para conciliación y total importado .xls; mantiene fórmulas reales y control de cobertura."),
         ("V5.6", "Separa pendientes reales abiertos de movimientos ya procesados/históricos en la pantalla principal y en el conteo del historial."),
+        ("V5.9.1", "Agrega auditoría QR humana uno a uno: Transacciones -> Banco -> Flexxus. Elimina diagnóstico final 'QR no reflejado' y clasifica en Cerrado, Banco no Flexxus, Flexxus no Banco o Solo Transacciones."),
         ("V5.5", "Corrige identificación de local/liquidación en Banco ingresos no Flexxus: usa TRX exacto, QR PCT y fallback por comprobante banco=código de comercio."),
     ]
     for i, (t, d) in enumerate(notas, 2):
@@ -2386,6 +2708,120 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
         ws_n.cell(i, 2, d).font = norm
     ws_n.column_dimensions["A"].width = 25
     ws_n.column_dimensions["B"].width = 90
+
+
+
+    # HOJA EXTRA V5.9.11: cierres QR por doble punta abierta
+    try:
+        v5911_df = res.get("v5911_cierres_qr_seguro", pd.DataFrame())
+        if v5911_df is not None and not v5911_df.empty:
+            ws_v = wb.create_sheet("Cierres QR V5.9.11")
+            ws_v.cell(1, 1, "Cierres QR V5.9.11: solo doble punta abierta simultánea").font = sub_f
+            ws_v.cell(2, 1, "Estos cierres bajan Banco ingresos no Flexxus y Flexxus no Banco al mismo tiempo. No usan PAV históricos ya procesados.").font = norm
+            hw(ws_v, 4, list(v5911_df.columns))
+            rr = 5
+            for _, row in v5911_df.iterrows():
+                dw(ws_v, rr, [row.get(c, "") for c in v5911_df.columns], mc=[4,8,9])
+                rr += 1
+            frz(ws_v); aw(ws_v, mx=65)
+    except Exception:
+        pass
+
+    # ---- V5.9.13: Hoja "Regularizaciones Ledger QR" ----
+    bloq3 = res.get("v5913_regla3_bloqueos", [])
+    if bloq3:
+        try:
+            ws_r3 = wb.create_sheet("Regularizaciones Ledger QR")
+            ws_r3.cell(1, 1, "Pendientes regularizados automáticamente por equivalencia QR histórica (V5.9.13)").font = sub_f
+            hw(ws_r3, 3, [
+                "ID Pendiente", "Fecha pendiente", "Comprobante banco", "Importe",
+                "Cupón QR histórico", "Local", "Fecha banco histórico",
+                "Comprobante histórico", "Período cierre cupón", "Diferencia", "Diagnóstico",
+            ])
+            rr = 4
+            total = 0.0
+            for b in bloq3:
+                dw(ws_r3, rr, [
+                    b.get("ID Pendiente", ""),
+                    b.get("Fecha pend", ""),
+                    b.get("Comp pend", ""),
+                    float(b.get("Importe pend", 0)),
+                    b.get("Cupon historico", ""),
+                    b.get("Local cupon", ""),
+                    b.get("Bank fecha historico", ""),
+                    b.get("Bank comprobante historico", ""),
+                    b.get("Periodo cierre cupon", ""),
+                    float(b.get("Diferencia", 0)),
+                    b.get("Diagnostico", ""),
+                ], mc=[4, 10])
+                total += float(b.get("Importe pend", 0))
+                rr += 1
+            rr += 1
+            ws_r3.cell(rr, 1, f"Total ({len(bloq3)} bloqueos)").font = bold_f
+            ws_r3.cell(rr, 4, total).number_format = money_fmt
+            ws_r3.cell(rr, 4).font = bold_f
+            frz(ws_r3); aw(ws_r3, mx=55)
+        except Exception:
+            pass
+
+    # ---- V5.9.13: Hoja "Ledger QR snapshot" ----
+    ledger_obj = res.get("v5912_ledger_obj")
+    if ledger_obj is not None:
+        try:
+            ws_l = wb.create_sheet("Ledger QR snapshot")
+            ws_l.cell(1, 1, "Foto del ledger QR persistente al cierre del período").font = sub_f
+            hw(ws_l, 3, [
+                "cupon_qr", "cupon_id", "fecha_qr", "local", "bruto", "neto_calc",
+                "estado", "bank_uid", "bank_fecha", "bank_importe", "bank_comprobante",
+                "flex_uid", "flex_fecha", "flex_numero", "flex_monto",
+                "periodo_origen", "periodo_cierre", "confianza", "motivo",
+            ])
+            rr = 4
+            for e in sorted(ledger_obj.by_cupon.values(), key=lambda x: (x.estado, -x.bruto)):
+                dw(ws_l, rr, [
+                    e.cupon_qr, e.cupon_id, e.fecha_qr, e.local,
+                    float(e.bruto), float(e.neto_calc),
+                    e.estado, e.bank_uid, e.bank_fecha,
+                    float(e.bank_importe), e.bank_comprobante,
+                    e.flex_uid, e.flex_fecha, e.flex_numero,
+                    float(e.flex_monto),
+                    e.periodo_origen, e.periodo_cierre, e.confianza, e.motivo,
+                ], mc=[5, 6, 10, 15])
+                rr += 1
+            frz(ws_l); aw(ws_l, mx=55)
+        except Exception:
+            pass
+
+    # ---- V5.9.13: Hoja oculta _QR_LEDGER con JSON serializado ----
+    # Esta hoja contiene el ledger completo en formato JSON, fragmentado en
+    # celdas para que pueda recuperarse en la próxima conciliación.
+    # No la mostramos al usuario (state='hidden').
+    if ledger_obj is not None:
+        try:
+            ledger_json = ledger_obj.to_json()  # string completo
+            ws_h = wb.create_sheet("_QR_LEDGER")
+            ws_h.cell(1, 1, "META").font = bold_f
+            ws_h.cell(1, 2, "QR_LEDGER_V1")
+            ws_h.cell(2, 1, "VERSION")
+            ws_h.cell(2, 2, "1")
+            ws_h.cell(3, 1, "CUPONES")
+            ws_h.cell(3, 2, len(ledger_obj.by_cupon))
+            ws_h.cell(4, 1, "TIMESTAMP")
+            from datetime import datetime
+            ws_h.cell(4, 2, datetime.utcnow().isoformat())
+            ws_h.cell(6, 1, "JSON_DATA")
+            # Excel limita celdas a ~32767 chars. Fragmentamos en chunks
+            # de 30000 chars consecutivos en columna B desde fila 7
+            CHUNK_SIZE = 30000
+            chunks = [ledger_json[i:i+CHUNK_SIZE] for i in range(0, len(ledger_json), CHUNK_SIZE)]
+            for idx, ch in enumerate(chunks):
+                ws_h.cell(7 + idx, 1, f"CHUNK_{idx:04d}")
+                ws_h.cell(7 + idx, 2, ch)
+            ws_h.cell(7 + len(chunks), 1, "END")
+            # Ocultar la hoja
+            ws_h.sheet_state = "hidden"
+        except Exception:
+            pass
 
     out = io.BytesIO()
     wb.save(out)
@@ -2418,6 +2854,24 @@ def build_import_xls(res: Dict) -> io.BytesIO:
             ws.write(i, 3, str(fr.get("FechaAcreditacionUsada", "")))
     for c in range(4):
         ws.col(c).width = 5000
+
+
+    # HOJA EXTRA V5.9.11: cierres QR por doble punta abierta
+    try:
+        v5911_df = res.get("v5911_cierres_qr_seguro", pd.DataFrame())
+        if v5911_df is not None and not v5911_df.empty:
+            ws_v = wb.create_sheet("Cierres QR V5.9.11")
+            ws_v.cell(1, 1, "Cierres QR V5.9.11: solo doble punta abierta simultánea").font = sub_f
+            ws_v.cell(2, 1, "Estos cierres bajan Banco ingresos no Flexxus y Flexxus no Banco al mismo tiempo. No usan PAV históricos ya procesados.").font = norm
+            hw(ws_v, 4, list(v5911_df.columns))
+            rr = 5
+            for _, row in v5911_df.iterrows():
+                dw(ws_v, rr, [row.get(c, "") for c in v5911_df.columns], mc=[4,8,9])
+                rr += 1
+            frz(ws_v); aw(ws_v, mx=65)
+    except Exception:
+        pass
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -2428,7 +2882,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.9-FINAL-GUARDRAILS-REGULARIZACIONES-CONTINUIDAD-2026-04-30"
+APP_VERSION = "V5.9.13 LEDGER QR + REGLA 3 EQUIVALENCIA HISTORICA · 2026-05-03"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
@@ -2736,17 +3190,284 @@ def render_diagnostico_tab():
     st.write("Secrets detectados")
     st.json({"APP_USER": bool(secret_get("APP_USER", "")), "APP_PASSWORD": bool(secret_get("APP_PASSWORD", "")), "GITHUB_TOKEN": bool(secret_get("GITHUB_TOKEN", "")), "GITHUB_REPO": secret_get("GITHUB_REPO", "")})
 
+
+# =============================================================================
+# V5.9.12 — Wrapper sobre el motor V5.9.11
+# =============================================================================
+# Estas funciones inyectan el ledger antes de match_previous_pendings y aprenden
+# del resultado después de apply_v5911_safe_double_punta. NO modifican ninguna
+# de las funciones del motor.
+
+def v5912_aplicar_bloqueo(flex: pd.DataFrame, bank: pd.DataFrame, ledger: "QRLedger") -> Dict[str, int]:
+    """Marca ConsumedPrev=True en filas Flex/Bank cuyo UID ya está en cupones
+    terminales del ledger. Devuelve {flex_bloqueados, bank_bloqueados}.
+
+    Esto hace que match_previous_pendings y match_current ignoren esas filas
+    sin necesidad de modificarlos.
+    """
+    out = {"flex_bloqueados": 0, "bank_bloqueados": 0}
+    if not LEDGER_DISPONIBLE or ledger is None:
+        return out
+    locked_b = _ledger_bank_uids_locked(ledger)
+    locked_f = _ledger_flex_uids_locked(ledger)
+
+    if not flex.empty and locked_f:
+        for idx, row in flex.iterrows():
+            if str(row.get("Tipo", "")).strip() != "PAV":
+                continue
+            uid = _ledger_flex_uid(
+                "PAV",
+                row.get("Numero", ""),
+                row.get("FechaFlexxus", ""),
+                row.get("MontoFlexxus", 0),
+            )
+            if uid in locked_f:
+                flex.at[idx, "ConsumedPrev"] = True
+                if "Diagnostico" in flex.columns:
+                    flex.at[idx, "Diagnostico"] = (
+                        "PAV bloqueado por ledger QR V5.9.12: ya cerrado en período anterior"
+                    )
+                if "MatchStage" in flex.columns:
+                    flex.at[idx, "MatchStage"] = "BLOQUEADO_LEDGER_QR"
+                out["flex_bloqueados"] += 1
+
+    if not bank.empty and locked_b:
+        for idx, row in bank.iterrows():
+            if str(row.get("Categoria", "")).strip() != "QR":
+                continue
+            if not row.get("EsIngreso", False):
+                continue
+            uid = _ledger_bank_uid(
+                row.get("Fecha", row.get("Fecha_dt", "")),
+                row.get("Comprobante", ""),
+                row.get("ImporteAbs", 0),
+            )
+            if uid in locked_b:
+                bank.at[idx, "ConsumedPrev"] = True
+                if "Diagnostico" in bank.columns:
+                    bank.at[idx, "Diagnostico"] = (
+                        "CR DEBIN bloqueado por ledger QR V5.9.12: ya cerrado en período anterior"
+                    )
+                if "MatchStage" in bank.columns:
+                    bank.at[idx, "MatchStage"] = "BLOQUEADO_LEDGER_QR"
+                out["bank_bloqueados"] += 1
+
+    return out
+
+
+def v5912_aprender_de_cierres(res: Dict, ledger: "QRLedger", periodo: str) -> Dict[str, int]:
+    """Después de apply_v5911_safe_double_punta, lo que el motor cerró se persiste
+    en el ledger. Si el cupón ya existía, no lo modifica. Si no, crea cupón
+    ficticio CERRADO_PAR_SIN_CUPON con bank_uid y flex_uid atados.
+
+    Idempotente: re-correr el mismo período no duplica ni rompe el ledger.
+    """
+    out = {"aprendidos": 0, "ya_conocidos": 0, "conflictos": 0}
+    if not LEDGER_DISPONIBLE or ledger is None:
+        return out
+    cierres = res.get("v5911_cierres_qr_seguro")
+    if cierres is None or cierres.empty:
+        return out
+    ahora = datetime.now().isoformat(timespec="seconds")
+    for _, r in cierres.iterrows():
+        try:
+            b_uid = _ledger_bank_uid(r["Fecha banco"], r["Comprobante banco"], r["Importe banco"])
+            f_uid = _ledger_flex_uid("PAV", r["PAV Flexxus"], r["Fecha Flexxus"], r["Importe Flexxus"])
+        except Exception:
+            continue
+        owner_b = ledger.by_bank.get(b_uid)
+        owner_f = ledger.by_flex.get(f_uid)
+        if owner_b and owner_f and owner_b == owner_f:
+            out["ya_conocidos"] += 1
+            continue
+        if owner_b and owner_f and owner_b != owner_f:
+            out["conflictos"] += 1
+            continue
+        if owner_b or owner_f:
+            cupon_id = owner_b or owner_f
+            try:
+                if not owner_b:
+                    ledger.attach_bank(cupon_id, b_uid, _ledger_iso_date(r["Fecha banco"]),
+                                       float(r["Importe banco"]), str(r["Comprobante banco"]),
+                                       motivo=f"completado en {periodo} desde matching V5.9.11")
+                if not owner_f:
+                    ledger.attach_flex(cupon_id, f_uid, _ledger_iso_date(r["Fecha Flexxus"]),
+                                       str(r["PAV Flexxus"]), float(r["Importe Flexxus"]), "",
+                                       motivo=f"completado en {periodo} desde matching V5.9.11")
+                out["aprendidos"] += 1
+            except ValueError:
+                out["conflictos"] += 1
+            continue
+        fake = _ledger_hash("PAR_SIN_CUPON", b_uid, f_uid)
+        try:
+            ledger.upsert_cupon(fake, {
+                "fecha_qr": _ledger_iso_date(r["Fecha banco"]),
+                "bruto": float(r["Importe Flexxus"]),
+                "neto_calc": float(r["Importe banco"]),
+                "bank_uid": b_uid,
+                "bank_fecha": _ledger_iso_date(r["Fecha banco"]),
+                "bank_importe": float(r["Importe banco"]),
+                "bank_comprobante": str(r["Comprobante banco"]),
+                "flex_uid": f_uid,
+                "flex_fecha": _ledger_iso_date(r["Fecha Flexxus"]),
+                "flex_numero": str(r["PAV Flexxus"]),
+                "flex_monto": float(r["Importe Flexxus"]),
+                "estado": _LedgerEstado.CERRADO_PAR_SIN_CUPON,
+                "confianza": "MEDIA",
+                "motivo": f"cerrado en {periodo} por motor V5.9.11 doble punta",
+                "periodo_origen": periodo,
+                "periodo_cierre": periodo,
+                "creado": ahora,
+            })
+            out["aprendidos"] += 1
+        except ValueError:
+            out["conflictos"] += 1
+    return out
+
+
+def v5912_cargar_ledger_desde_uploader(f_ledger) -> Optional["QRLedger"]:
+    """Lee qr_ledger.json subido por el usuario. Devuelve QRLedger o None."""
+    if not LEDGER_DISPONIBLE or f_ledger is None:
+        return None
+    try:
+        raw = f_ledger.getvalue() if hasattr(f_ledger, "getvalue") else f_ledger.read()
+        return QRLedger.from_json(json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw))
+    except Exception as e:
+        st.error(f"No se pudo leer el ledger QR: {e}")
+        return None
+
+
+def v5913_cargar_ledger_embebido(f_prev) -> Optional["QRLedger"]:
+    """Lee el ledger desde la hoja oculta '_QR_LEDGER' del Excel de conciliación anterior.
+
+    Si la hoja no existe (Excel viejo sin ledger embebido), devuelve None.
+    Si existe pero está malformado, también devuelve None y avisa.
+    """
+    if not LEDGER_DISPONIBLE or f_prev is None:
+        return None
+    try:
+        import openpyxl
+        # Necesitamos pasarle un BytesIO si viene como UploadedFile de Streamlit
+        if hasattr(f_prev, "getvalue"):
+            data = f_prev.getvalue()
+            f_prev.seek(0)  # rebobinar para que parse_previous_conciliation pueda leer también
+            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        else:
+            wb = openpyxl.load_workbook(f_prev, data_only=True)
+
+        if "_QR_LEDGER" not in wb.sheetnames:
+            return None
+
+        ws = wb["_QR_LEDGER"]
+        # Validar marca
+        meta_a = ws.cell(1, 1).value
+        meta_b = ws.cell(1, 2).value
+        if meta_a != "META" or meta_b != "QR_LEDGER_V1":
+            return None
+
+        # Reconstruir JSON desde los chunks consecutivos en columna B
+        chunks = []
+        row = 7
+        while True:
+            label = ws.cell(row, 1).value
+            if label is None or label == "END":
+                break
+            content = ws.cell(row, 2).value
+            if content is not None:
+                chunks.append(str(content))
+            row += 1
+            if row > 1000:  # safety
+                break
+        json_str = "".join(chunks)
+        if not json_str:
+            return None
+        return QRLedger.from_json(json.loads(json_str))
+    except Exception as e:
+        try:
+            st.warning(f"No se pudo leer el ledger embebido en la conciliación anterior: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def v5912_serializar_ledger(ledger: "QRLedger") -> bytes:
+    if ledger is None:
+        return b""
+    return ledger.to_json().encode("utf-8")
+
+
+def v5912_periodo_actual(bank: pd.DataFrame) -> str:
+    """Período = min..max de Fecha_dt en banco. Fallback a hoy."""
+    try:
+        if "Fecha_dt" in bank.columns and not bank.empty:
+            d_min = bank["Fecha_dt"].dropna().min()
+            d_max = bank["Fecha_dt"].dropna().max()
+            if pd.notna(d_min) and pd.notna(d_max):
+                return f"{pd.Timestamp(d_min).strftime('%Y-%m-%d')}..{pd.Timestamp(d_max).strftime('%Y-%m-%d')}"
+    except Exception:
+        pass
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def v5912_panel_telemetria(telem: Dict, ledger: "QRLedger") -> None:
+    """Renderiza el panel de telemetría del ledger en la UI."""
+    if not LEDGER_DISPONIBLE or ledger is None or not telem:
+        return
+    st.subheader("📒 Ledger QR V5.9.12")
+    cini, cfin = telem.get("ledger_inicial", {}), telem.get("ledger_final", {})
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("Cupones (inicio → fin)", f"{cini.get('cupones', 0)} → {cfin.get('cupones', 0)}")
+    cc2.metric("Bank UIDs atados", f"{cini.get('bank_uids_atados', 0)} → {cfin.get('bank_uids_atados', 0)}")
+    cc3.metric("Flex UIDs atados", f"{cini.get('flex_uids_atados', 0)} → {cfin.get('flex_uids_atados', 0)}")
+    cc4.metric("Cupones terminales", f"{cini.get('terminales', 0)} → {cfin.get('terminales', 0)}")
+
+    bloq = telem.get("bloqueos", {})
+    if bloq.get("flex_bloqueados", 0) or bloq.get("bank_bloqueados", 0):
+        st.success(
+            f"Bloqueados por ledger en esta corrida: "
+            f"{bloq.get('flex_bloqueados', 0)} PAV + {bloq.get('bank_bloqueados', 0)} CR DEBIN"
+        )
+    else:
+        st.info("Ningún PAV ni CR DEBIN bloqueado por ledger en esta corrida.")
+
+    apr = telem.get("aprendizaje", {})
+    if apr:
+        st.caption(
+            f"Aprendizaje: {apr.get('aprendidos', 0)} cierres nuevos al ledger, "
+            f"{apr.get('ya_conocidos', 0)} ya conocidos, "
+            f"{apr.get('conflictos', 0)} conflictos."
+        )
+
+    with st.expander("Resumen del ledger por estado", expanded=False):
+        st.dataframe(_ledger_resumen(ledger), use_container_width=True, hide_index=True)
+
+    invariantes = ledger.assert_invariants()
+    if invariantes:
+        st.error(f"Violaciones de invariantes detectadas ({len(invariantes)}):")
+        for p in invariantes[:5]:
+            st.code(p)
+    else:
+        st.caption("✅ Invariantes del ledger: ningún bank_uid ni flex_uid duplicado.")
+
+
 def render_conciliacion_tab():
     st.subheader("🏦 Conciliación")
-    st.info("Subí Flexxus y Banco como mínimo. TRX, QR y conciliación anterior mejoran la auditoría. Desde la segunda semana, subí siempre la conciliación anterior para cancelar pendientes.")
+    st.info("Subí Flexxus y Banco como mínimo. TRX, QR acumulado y conciliación anterior mejoran la auditoría. Desde la segunda semana, subí siempre la conciliación anterior para cancelar pendientes.")
+    if not LEDGER_DISPONIBLE:
+        st.warning(
+            "⚠️ V5.9.12: módulo qr_ledger.py no disponible. La app corre en modo V5.9.11 puro "
+            "(sin bloqueo de PAV ya procesados). Detalle: " + _LEDGER_IMPORT_ERROR
+        )
     col_a, col_b = st.columns(2)
     with col_a:
         f_flex = st.file_uploader("1 · Conciliación Bancaria Flexxus actual", type=["xls", "xlsx"], key="f_flex_v4")
         f_trx = st.file_uploader("3 · TRX Merchant Center", type=["xlsx", "xls"], key="f_trx_v4")
-        f_prev = st.file_uploader("5 · Conciliación anterior del sistema", type=["xlsx"], key="f_prev_v4")
+        f_prev = st.file_uploader("5 · Conciliación anterior del sistema", type=["xlsx"], key="f_prev_v4",
+                                   help="Esta planilla trae embebido el Ledger QR persistente (oculto). "
+                                        "Subiéndola, la app ya tiene todo lo que necesita para regla 3.")
     with col_b:
         f_bank = st.file_uploader("2 · Últimos movimientos Banco Nación actual", type=["xls", "xlsx"], key="f_bank_v4")
-        f_qr = st.file_uploader("4 · Transacciones QR", type=["xlsx", "xls"], key="f_qr_v4")
+        f_qr = st.file_uploader("4 · Transacciones QR acumuladas", type=["xlsx", "xls"], key="f_qr_v4")
     with st.expander("🧪 Diagnóstico de archivos cargados"):
         files = {"Flexxus": f_flex, "Banco": f_bank, "TRX": f_trx, "QR": f_qr, "Conciliación anterior": f_prev}
         st.dataframe(pd.DataFrame([{"Archivo": k, "Cargado": v is not None, "Nombre": getattr(v, "name", ""), "Tamaño bytes": getattr(v, "size", 0) if v is not None else 0} for k, v in files.items()]), use_container_width=True, hide_index=True)
@@ -2757,7 +3478,8 @@ def render_conciliacion_tab():
 
     run = st.button("▶️ Comenzar conciliación", type="primary", use_container_width=True)
     if st.button("🧹 Limpiar resultado", use_container_width=True):
-        for k in ["last_result_v4", "last_error_v4", "last_xlsx_v4", "last_xls_v4"]:
+        for k in ["last_result_v4", "last_error_v4", "last_xlsx_v4", "last_xls_v4",
+                  "last_ledger_v5912", "last_ledger_bytes_v5912"]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -2768,12 +3490,88 @@ def render_conciliacion_tab():
                 bank = parse_banco(f_bank)
                 trx = parse_trx(f_trx) if f_trx else pd.DataFrame()
                 qr = parse_qr(f_qr) if f_qr else pd.DataFrame()
+                # IMPORTANTE: leer el ledger embebido ANTES de parse_previous_conciliation
+                # porque ambas operaciones leen el mismo archivo y necesitamos rebobinar.
+                ledger_embebido = v5913_cargar_ledger_embebido(f_prev) if LEDGER_DISPONIBLE else None
                 prev_open, prev_summary, mode = parse_previous_conciliation(f_prev)
+            # ---- V5.9.13: usar ledger embebido en la conciliación anterior --
+            ledger = None
+            telem = {}
+            periodo = v5912_periodo_actual(bank)
+            if LEDGER_DISPONIBLE and ledger_embebido is not None:
+                ledger = ledger_embebido
+                st.caption(f"📒 Ledger QR cargado desde la conciliación anterior: {len(ledger.by_cupon)} cupones, {sum(1 for e in ledger.by_cupon.values() if e.es_terminal())} terminales.")
+                if ledger is not None:
+                    telem["ledger_inicial"] = {
+                        "cupones": len(ledger.by_cupon),
+                        "bank_uids_atados": len(ledger.by_bank),
+                        "flex_uids_atados": len(ledger.by_flex),
+                        "terminales": sum(1 for e in ledger.by_cupon.values() if e.es_terminal()),
+                    }
+                    if not qr.empty:
+                        ledger, _nuevos = _ledger_ingest_qr(ledger, qr, periodo=periodo)
+                        telem["cupones_ingresados"] = _nuevos
+                    telem["banco_a_cupones"] = _ledger_attach_bank(ledger, bank, periodo=periodo)
+                    telem["flex_a_cupones"] = _ledger_attach_flex(ledger, flex, periodo=periodo)
+                    # Reglas 1+2 (bloqueo pre-motor) DESACTIVADAS: cuando hay prev_open real,
+                    # match_previous_pendings ya hace el trabajo. El bloqueo pre-motor
+                    # generaba falsos positivos. La protección queda en la regla 3 post-motor.
+            elif LEDGER_DISPONIBLE:
+                st.caption("⚠️ La conciliación anterior no contiene ledger QR embebido. Corrida en modo V5.9.11 (sin regla 3). El próximo Excel descargado SÍ traerá el ledger embebido para usar en futuras corridas.")
+            # ----------------------------------------------------------------
             with st.spinner("Cancelando pendientes anteriores contra movimientos actuales..."):
                 prev_status, flex, bank, regs = match_previous_pendings(prev_open, flex, bank, prev_summary)
             with st.spinner("Conciliando movimientos corrientes..."):
                 flex, bank = match_current(flex, bank, qr, trx)
                 res = compute_results(flex, bank, prev_status, regs, mode, prev_summary)
+                res = apply_v5911_safe_double_punta(res)
+            # ---- V5.9.13: arrastrar REG3 anteriores al pendientes_proxima del período actual ----
+            # Los pendientes con Origen=BANCO_NO_FLEXXUS_REGULARIZADO_REGLA3 vienen del Excel
+            # anterior. Hay que persistirlos también en este Excel para que la cadena de
+            # regularizaciones se mantenga. v5911_recompute_from_pendings los reconoce y los
+            # suma al REG3 del cálculo.
+            if not prev_open.empty:
+                reg3_anteriores = prev_open[
+                    prev_open["Origen"].astype(str).eq("BANCO_NO_FLEXXUS_REGULARIZADO_REGLA3")
+                ].copy()
+                if not reg3_anteriores.empty:
+                    pend_actual = res.get("pendientes_proxima", pd.DataFrame())
+                    pend_combined = pd.concat([pend_actual, reg3_anteriores], ignore_index=True) if not pend_actual.empty else reg3_anteriores
+                    res["pendientes_proxima"] = pend_combined
+                    res = v5911_recompute_from_pendings(res)
+            # ---- V5.9.13: Regla 3 sobre pendientes finales ----
+            bloqueos_regla3 = []
+            if ledger is not None:
+                try:
+                    from qr_ledger_regla3_v2 import aplicar_regla3_sobre_pendientes
+                    bloqueos_regla3, cup_used, _ = aplicar_regla3_sobre_pendientes(
+                        res, ledger, max_days_after=7,
+                    )
+                    telem["regla3_bloqueos"] = len(bloqueos_regla3)
+                    telem["regla3_monto"] = sum(b["Importe pend"] for b in bloqueos_regla3)
+                    telem["regla3_cupones_usados"] = len(cup_used)
+                except Exception as ex:
+                    st.warning(f"Regla 3 no se pudo aplicar: {ex}")
+            res["v5913_regla3_bloqueos"] = bloqueos_regla3
+            # ---------------------------------------------------
+            # ---- V5.9.12: aprender de los cierres y dejar ledger persistible
+            if ledger is not None:
+                telem["aprendizaje"] = v5912_aprender_de_cierres(res, ledger, periodo)
+                telem["ledger_final"] = {
+                    "cupones": len(ledger.by_cupon),
+                    "bank_uids_atados": len(ledger.by_bank),
+                    "flex_uids_atados": len(ledger.by_flex),
+                    "terminales": sum(1 for e in ledger.by_cupon.values() if e.es_terminal()),
+                }
+                res["v5912_telemetria"] = telem
+                res["v5912_ledger_resumen"] = _ledger_resumen(ledger)
+                res["v5912_ledger_obj"] = ledger  # para que build_excel_report pueda exportar snapshot
+                st.session_state.last_ledger_v5912 = ledger
+                st.session_state.last_ledger_bytes_v5912 = v5912_serializar_ledger(ledger)
+            else:
+                st.session_state.pop("last_ledger_v5912", None)
+                st.session_state.pop("last_ledger_bytes_v5912", None)
+            # ----------------------------------------------------------------
             with st.spinner("Generando entregables..."):
                 xlsx = build_excel_report(flex, bank, qr, trx, res)
                 xls = build_import_xls(res)
@@ -2800,6 +3598,10 @@ def render_conciliacion_tab():
     c2.metric("Saldo Banco", f"${res['saldo_banco']:,.2f}")
     c3.metric("Banco calculado", f"${res['calc_final']:,.2f}")
     c4.metric("Diferencia", f"${res['diferencia']:,.2f}")
+
+    # V5.9.12: panel del ledger
+    if "v5912_telemetria" in res and st.session_state.get("last_ledger_v5912") is not None:
+        v5912_panel_telemetria(res["v5912_telemetria"], st.session_state.last_ledger_v5912)
 
     cont = res.get("continuity", {})
     if cont.get("aplica"):
@@ -2872,9 +3674,23 @@ def render_conciliacion_tab():
 
     d1, d2 = st.columns(2)
     with d1:
-        st.download_button("Descargar Excel de conciliación V5.9", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("Descargar Excel de conciliación V5.9.13", data=st.session_state.last_xlsx_v4, file_name="Conciliacion_Semanal_Dancona_V5_9_13.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with d2:
-        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_9.xls", mime="application/vnd.ms-excel", use_container_width=True)
+        st.download_button("Descargar .xls para importar a Flexxus", data=st.session_state.last_xls_v4, file_name="ASIENTOS_FLEXXUS_V5_9_12.xls", mime="application/vnd.ms-excel", use_container_width=True)
+
+    # Botón opcional para respaldar el ledger por si querés tenerlo aparte
+    # del Excel. Ya NO es necesario para la próxima corrida (va embebido en el Excel).
+    if st.session_state.get("last_ledger_bytes_v5912"):
+        with st.expander("📒 Respaldo opcional del Ledger QR (no es necesario)"):
+            st.caption("El ledger ya viene embebido en el Excel de conciliación que descargás arriba. "
+                       "Este botón es solo si querés tener el JSON como backup separado.")
+            st.download_button(
+                "Descargar Ledger QR como JSON (respaldo)",
+                data=st.session_state.last_ledger_bytes_v5912,
+                file_name="qr_ledger.json",
+                mime="application/json",
+                use_container_width=True,
+            )
 
     if st.button("💾 Guardar resumen en historial", use_container_width=True):
         ok, msg = guardar_resumen_historial(res, res.get("mode", ""), st.session_state.get("last_xlsx_v4"), st.session_state.get("last_xls_v4"))
@@ -2906,3 +3722,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# =============================================================================
+# V5.9.11 - SEMILLA QR OFICIAL / CONTROL DE REUSO
+# =============================================================================
+# Esta versión mantiene el motor V5.9.1 chequeado y agrega una regla de auditoría:
+# antes de aceptar un cierre QR por importe, verifica que el PAV/Banco candidato
+# no haya sido ya usado en la conciliación oficial anterior (Carga Flexxus / Regularizaciones).
+# Esto evita el loop: muchos CR DEBIN parecen cerrar contra PAV por importe repetido,
+# pero esos PAV ya fueron usados contra otra acreditación bancaria en la base 20-24.
+
+def v5911_make_uid(*parts):
+    raw = "|".join([norm_txt(x) for x in parts])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16].upper()
+
+def v5911_control_reuso_qr_note():
+    return (
+        "V5.9.11: Ledger QR con semilla oficial. No se permite cerrar un CR DEBIN "
+        "contra un PAV/Banco que ya figura procesado en Carga Flexxus o Regularizaciones "
+        "de la conciliación anterior oficial. El match QR requiere candidato no usado."
+    )
