@@ -1,38 +1,3 @@
 {
-  "semanas": [
-    {
-      "id": "20260430_201205",
-      "fecha_proceso": "30/04/2026 20:12:08",
-      "version_app": "V5.9-FINAL-GUARDRAILS-REGULARIZACIONES-CONTINUIDAD-2026-04-30",
-      "modo": "APERTURA",
-      "saldo_flexxus": 37824483.97,
-      "saldo_banco": 29620748.49,
-      "banco_calculado": 29620748.49,
-      "diferencia": 0.0,
-      "C1_flexxus_ingresos_no_banco": 5771083.03,
-      "C2_flexxus_egresos_no_banco": 0.0,
-      "C3_banco_ingresos_no_flexxus": 65270.86,
-      "C4_banco_egresos_no_flexxus": 2497923.31,
-      "pendientes_anteriores_abiertos": 0,
-      "regularizaciones_anteriores": 0,
-      "pendientes_proxima": 1133,
-      "trazabilidad_procesada_anterior": 0,
-      "mbext_agregados": 0,
-      "archivos": [
-        {
-          "tipo": "conciliacion_xlsx",
-          "nombre": "Conciliacion_Semanal_Dancona_20260430_201205.xlsx",
-          "path": "historial/20260430_201205/Conciliacion_Semanal_Dancona_20260430_201205.xlsx",
-          "bytes": 197268
-        },
-        {
-          "tipo": "import_flexxus_xls",
-          "nombre": "ASIENTOS_FLEXXUS_20260430_201205.xls",
-          "path": "historial/20260430_201205/ASIENTOS_FLEXXUS_20260430_201205.xls",
-          "bytes": 22016
-        }
-      ],
-      "eliminado": false
-    }
-  ]
+  "semanas": []
 }
