@@ -2488,32 +2488,147 @@ def build_excel_report(flex: pd.DataFrame, bank: pd.DataFrame, qr: pd.DataFrame,
     # HOJA 7: Carga Flexxus
     ws2 = wb.create_sheet("Carga Flexxus")
     ws2.cell(1, 1, "Movimientos para archivo de importación Flexxus").font = sub_f
+
+    # V5.9.13: armamos el listado completo (matched_flex + regularizaciones desde Flexxus)
+    # para que coincida 1:1 con lo que build_import_xls genera.
     matched = res.get("matched_flex", pd.DataFrame()).copy()
     if matched is None:
         matched = pd.DataFrame()
-    pav_match = matched[matched["Tipo"] == "PAV"] if not matched.empty and "Tipo" in matched.columns else pd.DataFrame()
-    mbex_match = matched[matched["Tipo"] == "MB-ENT-EX"] if not matched.empty and "Tipo" in matched.columns else pd.DataFrame()
-    mbext_match = matched[matched["Tipo"] == "MB-EXT"] if not matched.empty and "Tipo" in matched.columns else pd.DataFrame()
-    total_qty = len(matched)
-    total_amt = float(matched["MontoFlexxus"].sum()) if not matched.empty and "MontoFlexxus" in matched.columns else 0.0
+
+    # Construir DataFrame combinado preservando origen
+    filas_carga = []
+    claves_vistas = set()
+
+    # 1) Bloque matched_flex
+    if not matched.empty:
+        for _, f in matched.iterrows():
+            tipo = str(f.get("Tipo", ""))
+            numero = str(f.get("Numero", ""))
+            fecha = str(f.get("FechaFlexxus", ""))
+            clave = f"{tipo}|{numero}|{fecha}"
+            claves_vistas.add(clave)
+            fa = f.get("FechaAcreditacionUsada", "") or f.get("BancoFecha", "") or f.get("FechaFlexxus", "")
+            ajuste = "Sí" if f.get("BancoFecha", "") and f.get("BancoFecha", "") != fa else "No"
+            filas_carga.append({
+                "Fecha mov. Flexxus": f.get("FechaFlexxus", ""),
+                "Tipo": tipo,
+                "Nro. Flexxus": numero,
+                "Monto": float(f.get("MontoFlexxus", 0.0)),
+                "Fecha banco real": f.get("BancoFecha", ""),
+                "Fecha acreditación a importar": fa,
+                "Concepto banco": f.get("BancoConcepto", ""),
+                "Comprobante banco": f.get("BancoComprobante", ""),
+                "Ajuste fecha": ajuste,
+                "Origen": "Match período actual",
+            })
+
+    # 2) Bloque regularizaciones desde Flexxus (V5.9.13)
+    regs = res.get("regularizaciones", pd.DataFrame())
+    if regs is not None and not regs.empty:
+        regs_flex = regs[regs.get("Regularizado con", "").astype(str) == "Flexxus"].copy()
+        for _, rr in regs_flex.iterrows():
+            tipo = str(rr.get("Tipo actual", ""))
+            numero = str(rr.get("Referencia actual", ""))
+            if not tipo or not numero or tipo not in {"PAV", "MB-EXT", "MB-ENT-EX"}:
+                continue
+            fecha_flex = str(rr.get("Fecha regularización", ""))
+            clave = f"{tipo}|{numero}|{fecha_flex}"
+            if clave in claves_vistas:
+                continue
+            claves_vistas.add(clave)
+            monto = abs(float(rr.get("Monto actual", 0) or 0))
+            if monto < 0.005:
+                continue
+            filas_carga.append({
+                "Fecha mov. Flexxus": rr.get("Fecha regularización", ""),
+                "Tipo": tipo,
+                "Nro. Flexxus": numero,
+                "Monto": monto,
+                "Fecha banco real": rr.get("Fecha origen", ""),
+                "Fecha acreditación a importar": rr.get("Fecha origen", "") or rr.get("Fecha regularización", ""),
+                "Concepto banco": str(rr.get("Concepto pendiente", "")),
+                "Comprobante banco": "",
+                "Ajuste fecha": "No",
+                "Origen": "Regulariza pendiente anterior",
+            })
+
+    # 3) Bloque MB-EXT consolidado autogenerado (V5.9.13)
+    pend = res.get("pendientes_proxima", pd.DataFrame())
+    if pend is not None and not pend.empty:
+        AUTO_CONSOLIDABLES = {
+            "IMPUESTO_LEY25413_CRED", "IMPUESTO_LEY25413_DEB",
+            "RETENCION_IIBB", "IVA", "GASTO_BANCARIO", "OTRO",
+            "DEBITO_LIQ_TARJETA",
+        }
+        consolidables = pend[
+            (pend["Origen"].astype(str) == "BANCO_NO_FLEXXUS") &
+            (pend["SignoCalculo"].astype(float) < 0) &
+            (pend["Categoria"].astype(str).isin(AUTO_CONSOLIDABLES))
+        ].copy()
+        if not consolidables.empty:
+            consolidables["FechaKey"] = consolidables["FechaOrigen"].astype(str).str[:10]
+            agrup = consolidables.groupby(["FechaKey", "Categoria"]).agg(
+                Monto=("Monto", "sum"),
+                Cantidad=("pending_id", "count"),
+            ).reset_index()
+            CAT_TO_CONCEPTO = {
+                "IMPUESTO_LEY25413_CRED": "GRAVAMEN LEY 25.413 S/CRED",
+                "IMPUESTO_LEY25413_DEB": "GRAVAMEN LEY 25.413 S/DEB",
+                "RETENCION_IIBB": "INGRESOS BRUTOS",
+                "IVA": "I.V.A. BASE",
+                "GASTO_BANCARIO": "COMISION BANCARIA",
+                "DEBITO_LIQ_TARJETA": "DEB LIQ TARJETA",
+                "OTRO": "OTROS GASTOS BANCARIOS",
+            }
+            for _, ar in agrup.iterrows():
+                fecha = ar["FechaKey"]
+                cat = ar["Categoria"]
+                monto = float(ar["Monto"])
+                if monto < 0.005:
+                    continue
+                clave = f"MB-EXT|AUTO-{cat}-{fecha}|{fecha}"
+                if clave in claves_vistas:
+                    continue
+                claves_vistas.add(clave)
+                concepto = CAT_TO_CONCEPTO.get(cat, cat)
+                filas_carga.append({
+                    "Fecha mov. Flexxus": fecha,
+                    "Tipo": "MB-EXT",
+                    "Nro. Flexxus": f"AUTO-{cat[:8]}-{fecha[-5:]}",
+                    "Monto": monto,
+                    "Fecha banco real": fecha,
+                    "Fecha acreditación a importar": fecha,
+                    "Concepto banco": f"CONSOLIDADO {ar['Cantidad']} líneas {concepto}",
+                    "Comprobante banco": "",
+                    "Ajuste fecha": "No",
+                    "Origen": "MB-EXT consolidado autogenerado V5.9.13",
+                })
+
+    # Totales
+    pav_filas = [r for r in filas_carga if r["Tipo"] == "PAV"]
+    mbex_filas = [r for r in filas_carga if r["Tipo"] == "MB-ENT-EX"]
+    mbext_filas = [r for r in filas_carga if r["Tipo"] == "MB-EXT"]
+    total_qty = len(filas_carga)
+    total_amt = sum(r["Monto"] for r in filas_carga)
     for i, (tipo, qty, total) in enumerate([
-        ("PAV", len(pav_match), float(pav_match["MontoFlexxus"].sum()) if not pav_match.empty else 0.0),
-        ("MB-ENT-EX", len(mbex_match), float(mbex_match["MontoFlexxus"].sum()) if not mbex_match.empty else 0.0),
-        ("MB-EXT", len(mbext_match), float(mbext_match["MontoFlexxus"].sum()) if not mbext_match.empty else 0.0),
+        ("PAV", len(pav_filas), sum(r["Monto"] for r in pav_filas)),
+        ("MB-ENT-EX", len(mbex_filas), sum(r["Monto"] for r in mbex_filas)),
+        ("MB-EXT", len(mbext_filas), sum(r["Monto"] for r in mbext_filas)),
         ("TOTAL", total_qty, total_amt),
     ], 2):
         ws2.cell(i, 1, tipo).font = norm
         ws2.cell(i, 2, qty).font = norm
         c = ws2.cell(i, 3, total); c.number_format = money_fmt
     rn = 6
-    hw(ws2, rn, ["Fecha mov. Flexxus", "Tipo", "Nro. Flexxus", "Monto", "Fecha banco real", "Fecha acreditación a importar", "Concepto banco", "Comprobante banco", "Ajuste fecha"])
+    hw(ws2, rn, ["Fecha mov. Flexxus", "Tipo", "Nro. Flexxus", "Monto", "Fecha banco real", "Fecha acreditación a importar", "Concepto banco", "Comprobante banco", "Ajuste fecha", "Origen"])
     rn += 1
-    if not matched.empty:
-        for _, f in matched.iterrows():
-            fa = f.get("FechaAcreditacionUsada", "") or f.get("BancoFecha", "") or f.get("FechaFlexxus", "")
-            ajuste = "Sí" if f.get("BancoFecha", "") and f.get("BancoFecha", "") != fa else "No"
-            dw(ws2, rn, [f.get("FechaFlexxus", ""), f.get("Tipo", ""), f.get("Numero", ""), float(f.get("MontoFlexxus", 0.0)), f.get("BancoFecha", ""), fa, f.get("BancoConcepto", ""), f.get("BancoComprobante", ""), ajuste], mc=[4])
-            rn += 1
+    for f in filas_carga:
+        dw(ws2, rn, [
+            f["Fecha mov. Flexxus"], f["Tipo"], f["Nro. Flexxus"],
+            f["Monto"], f["Fecha banco real"], f["Fecha acreditación a importar"],
+            f["Concepto banco"], f["Comprobante banco"], f["Ajuste fecha"], f["Origen"],
+        ], mc=[4])
+        rn += 1
     frz(ws2); aw(ws2)
 
     # HOJA 8: Auditoría QR PCT
@@ -2837,21 +2952,129 @@ def build_import_xls(res: Dict) -> io.BytesIO:
     headers = ["FECHAMOVIMIENTO", "TIPOMOVIMIENTO", "MONTO", "FECHAACREDITACION"]
     for c, h in enumerate(headers):
         ws.write(0, c, h, header_style)
-    matched = res["matched_flex"].copy()
-    # Solo movimientos corrientes. No incluye ConsumedPrev.
-    for i, (_, fr) in enumerate(matched.iterrows(), 1):
-        fm = safe_date(fr["FechaFlexxus"])
-        fa = safe_date(fr.get("FechaAcreditacionUsada", "") or fr.get("BancoFecha", "") or fr["FechaFlexxus"])
+
+    # ===========================================================
+    # V5.9.13: el archivo de asientos contiene TRES bloques:
+    #
+    #   1. matched_flex: movimientos del período actual que la app
+    #      matcheó contra el banco. Son los asientos "nuevos".
+    #
+    #   2. regularizaciones desde Flexxus (campo "Regularizado con"
+    #      == "Flexxus"). Son movimientos del período actual que ya
+    #      están en Flexxus pero la app reconoció como regularizadores
+    #      de pendientes anteriores. Si el flex que se subió tenía
+    #      esos movimientos, vienen acá.
+    #
+    #   3. MB-EXT CONSOLIDADO AUTOGENERADO: cuando hay múltiples
+    #      impuestos / comisiones / IIBB / IVA en el extracto del
+    #      banco que NO están en Flexxus, la app genera UN asiento
+    #      MB-EXT por categoría que agrupa todos esos pendientes.
+    #      Antes el conciliador tenía que cargarlos manualmente. Ahora
+    #      la app los genera para que se importen directo.
+    # ===========================================================
+
+    claves_escritas = set()
+    fila = 1
+
+    def _escribir_fila(fecha_mov, tipo, monto, fecha_acre):
+        nonlocal fila
+        fm = safe_date(fecha_mov)
+        fa = safe_date(fecha_acre)
         if pd.notna(fm):
-            ws.write(i, 0, fm.to_pydatetime(), date_style)
+            ws.write(fila, 0, fm.to_pydatetime(), date_style)
         else:
-            ws.write(i, 0, str(fr["FechaFlexxus"]))
-        ws.write(i, 1, str(fr["Tipo"]))
-        ws.write(i, 2, float(abs(fr["MontoFlexxus"])), money_style)
+            ws.write(fila, 0, str(fecha_mov))
+        ws.write(fila, 1, str(tipo))
+        ws.write(fila, 2, float(abs(monto)), money_style)
         if pd.notna(fa):
-            ws.write(i, 3, fa.to_pydatetime(), date_style)
+            ws.write(fila, 3, fa.to_pydatetime(), date_style)
         else:
-            ws.write(i, 3, str(fr.get("FechaAcreditacionUsada", "")))
+            ws.write(fila, 3, str(fecha_acre or fecha_mov))
+        fila += 1
+
+    # ---- Bloque 1: matched_flex ----
+    matched = res.get("matched_flex", pd.DataFrame()).copy()
+    if not matched.empty:
+        for _, fr in matched.iterrows():
+            tipo = str(fr["Tipo"])
+            numero = str(fr.get("Numero", ""))
+            fm = safe_date(fr["FechaFlexxus"])
+            clave = f"{tipo}|{numero}|{fm}"
+            claves_escritas.add(clave)
+            fa = fr.get("FechaAcreditacionUsada", "") or fr.get("BancoFecha", "") or fr["FechaFlexxus"]
+            _escribir_fila(fr["FechaFlexxus"], tipo, fr["MontoFlexxus"], fa)
+
+    # ---- Bloque 2: regularizaciones desde Flexxus (V5.9.13) ----
+    regs = res.get("regularizaciones", pd.DataFrame())
+    if regs is not None and not regs.empty:
+        regs_flex = regs[regs.get("Regularizado con", "").astype(str) == "Flexxus"].copy()
+        for _, rr in regs_flex.iterrows():
+            tipo = str(rr.get("Tipo actual", ""))
+            numero = str(rr.get("Referencia actual", ""))
+            if not tipo or not numero or tipo not in {"PAV", "MB-EXT", "MB-ENT-EX"}:
+                continue
+            fm = safe_date(rr.get("Fecha regularización", ""))
+            clave = f"{tipo}|{numero}|{fm}"
+            if clave in claves_escritas:
+                continue
+            claves_escritas.add(clave)
+            monto = abs(float(rr.get("Monto actual", 0) or 0))
+            if monto < 0.005:
+                continue
+            fa = rr.get("Fecha origen", "") or rr.get("Fecha regularización", "")
+            _escribir_fila(rr.get("Fecha regularización", ""), tipo, monto, fa)
+
+    # ---- Bloque 3: MB-EXT consolidado autogenerado (V5.9.13) ----
+    # Toma los pendientes del banco egresos no Flexxus actuales (impuestos,
+    # comisiones, IIBB, IVA) que NO están en Flexxus, y los consolida en
+    # asientos MB-EXT por categoría y por fecha.
+    pend = res.get("pendientes_proxima", pd.DataFrame())
+    if pend is not None and not pend.empty:
+        # Categorías que se consolidan en MB-EXT
+        AUTO_CONSOLIDABLES = {
+            "IMPUESTO_LEY25413_CRED", "IMPUESTO_LEY25413_DEB",
+            "RETENCION_IIBB", "IVA", "GASTO_BANCARIO", "OTRO",
+            "DEBITO_LIQ_TARJETA",
+        }
+        # Tomar solo egresos del banco actual (Origen=BANCO_NO_FLEXXUS, signo<0)
+        # con categoría regularizable
+        consolidables = pend[
+            (pend["Origen"].astype(str) == "BANCO_NO_FLEXXUS") &
+            (pend["SignoCalculo"].astype(float) < 0) &
+            (pend["Categoria"].astype(str).isin(AUTO_CONSOLIDABLES))
+        ].copy()
+        if not consolidables.empty:
+            # Agrupar por (Fecha, Categoría) y consolidar
+            consolidables["FechaKey"] = consolidables["FechaOrigen"].astype(str).str[:10]
+            agrup = consolidables.groupby(["FechaKey", "Categoria"]).agg(
+                Monto=("Monto", "sum"),
+                Cantidad=("pending_id", "count"),
+            ).reset_index()
+
+            # Mapeo categoría -> concepto humano
+            CAT_TO_CONCEPTO = {
+                "IMPUESTO_LEY25413_CRED": "GRAVAMEN LEY 25.413 S/CRED",
+                "IMPUESTO_LEY25413_DEB": "GRAVAMEN LEY 25.413 S/DEB",
+                "RETENCION_IIBB": "INGRESOS BRUTOS",
+                "IVA": "I.V.A. BASE",
+                "GASTO_BANCARIO": "COMISION BANCARIA",
+                "DEBITO_LIQ_TARJETA": "DEB LIQ TARJETA",
+                "OTRO": "OTROS GASTOS BANCARIOS",
+            }
+
+            for _, ar in agrup.iterrows():
+                fecha = ar["FechaKey"]
+                cat = ar["Categoria"]
+                monto = float(ar["Monto"])
+                if monto < 0.005:
+                    continue
+                # Generar clave única para evitar duplicados
+                clave = f"MB-EXT|AUTO-{cat}-{fecha}|{fecha}"
+                if clave in claves_escritas:
+                    continue
+                claves_escritas.add(clave)
+                _escribir_fila(fecha, "MB-EXT", monto, fecha)
+
     for c in range(4):
         ws.col(c).width = 5000
 
@@ -2882,7 +3105,7 @@ def build_import_xls(res: Dict) -> io.BytesIO:
 # UI STREAMLIT V4 INTEGRADA
 # =============================================================================
 
-APP_VERSION = "V5.9.13 LEDGER QR + REGLA 3 EQUIVALENCIA HISTORICA · 2026-05-03"
+APP_VERSION = "V5.9.13.1 LEDGER QR + REGLA 3 + MB-EXT AUTOGEN · 2026-05-03"
 HISTORIAL_FILE = "historico.json"
 
 def secret_get(key: str, default: str = "") -> str:
